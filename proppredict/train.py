@@ -19,8 +19,26 @@ default_config = {
     "internal_folds": 5,
     "smiles_col": "SMILES",
     "target_col": "ACTIVITY",
-    "seed": 42
+    "seed": 42,
+    "use_rdkit_features": False,
+    "scale_rdkit_features": True
 }
+
+
+def patch_config_for_rdkit(config):
+    """
+    Updates the Chemprop training and prediction configuration to include
+    RDKit features and normalization if specified in the config.
+    """
+    base_args = []
+
+    if config.get("use_rdkit_features", False):
+        base_args.extend([
+            "--features_generator", "rdkit_2d_normalized",
+            "--no_features_scaling" if not config.get("scale_rdkit_features", True) else ""
+        ])
+
+    return [arg for arg in base_args if arg]
 
 
 def mean_ci(scores, confidence=0.95):
@@ -43,7 +61,7 @@ def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config):
         "--num_folds", "1",
         "--metric", config["metric"],
         "--epochs", str(config["num_epochs"])
-    ]
+    ] + patch_config_for_rdkit(config)
     subprocess.run(command, check=True)
 
 def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
@@ -79,8 +97,8 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
         
         safe_run_chemprop_train(train_path,
                                 val_path,
-                                # test_path, #TODO: rewrite to incorporate test_path 
-                                model_dir,
+                                # test_path, #TODO: rewrite to incorporate test_path
+                                model_dir, 
                                 config) 
 
         
@@ -94,7 +112,7 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
                 "--test_path", val_path,
                 "--checkpoint_path", os.path.join(model_dir, "fold_0", "model_0", "model.pt"),
                 "--preds_path", val_preds_path,
-                "--smiles_column", config["smiles_col"]
+                "--smiles_column", config["smiles_col"] #TODO: add rdkit config
             ], check=True)
 
             val_df = pd.read_csv(val_path)
