@@ -170,7 +170,7 @@ def evaluate_predictions(preds_csv, config):
     if "prediction" not in test_preds.columns and config["target_col"] not in test_preds.columns:
         raise ValueError("❌ No prediction column found in test predictions.")
     # y_score = test_preds.get("prediction", test_preds[config["target_col"]])
-    y_score = pd.to_numeric(preds.get("prediction", preds[config["target_col"]]), errors="coerce")
+    y_score = pd.to_numeric(test_preds.get("prediction", test_preds[config["target_col"]]), errors="coerce")
     if y_score.isnull().any():
         print("⚠️ Warning: Some predicted scores could not be converted to floats.")
         y_score = y_score.fillna(0.0)  # or drop rows
