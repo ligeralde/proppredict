@@ -110,7 +110,7 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
                 # else:
                     # raise ValueError(f"Unsupported metric: {config['metric']}")
                 with open(val_scores_path, "w") as f:
-                    f.write(f'{{"roc_auc": {roc_auc:.4f}, "f1": {f1:.4f}, "auc_pr": {auc_pr:.4f}}}')
+                    f.write(f'{{"auc": {roc_auc:.4f}, "f1": {f1:.4f}, "auc_pr": {auc_pr:.4f}}}')
                 print(f"✅ Manually computed and saved val scores: AUC={roc_auc:.4f}, F1={f1:.4f}, PR={auc_pr:.4f}")
 
 
