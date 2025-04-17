@@ -238,17 +238,15 @@ def run_kfold_cv(config):
 
         train_path = os.path.join(fold_dir, "train.csv")
         val_path = os.path.join(fold_dir, "val.csv")
-        test_path = os.path.join(fold_dir, "test.csv")
 
-        # Save train and val normally
-        train_df.to_csv(train_path, index=False)
         val_df.to_csv(val_path, index=False)
 
         if use_holdout:
+            test_path = os.path.join(fold_dir, "test.csv")
             test_df.to_csv(test_path, index=False)
         else:
-            # Reuse validation set for testing if no holdout provided
-            val_df.to_csv(test_path, index=False)
+            test_path = val_path  # reuse the same file to avoid duplication
+            print(f"🔁 Using val.csv as both validation and test set for fold {fold_idx}")
 
         model_dir = os.path.join(fold_dir, "model")
 
