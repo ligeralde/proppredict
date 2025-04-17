@@ -28,6 +28,22 @@ def mean_ci(scores, confidence=0.95):
     ci_range = t.ppf((1 + confidence) / 2., len(scores) - 1) * stderr
     return mean, (mean - ci_range, mean + ci_range)
 
+def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config):
+    command = [
+        "chemprop_train",
+        "--data_path", train_path,
+        "--separate_val_path", val_path,
+        "--separate_test_path", test_path,
+        "--save_preds",
+        "--dataset_type", "classification",
+        "--smiles_column", config["smiles_col"],
+        "--target_columns", config["target_col"],
+        "--save_dir", save_dir,
+        "--num_folds", "1",
+        "--metric", config["metric"],
+        "--epochs", str(config["num_epochs"])
+    ]
+    subprocess.run(command, check=True)
 
 def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
     skf_internal = StratifiedKFold(n_splits=config["internal_folds"], shuffle=True, random_state=ext_fold_idx)
@@ -59,18 +75,12 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
         int_val_df.to_csv(val_path, index=False)
 
         model_dir = os.path.join(int_dir, "model")
-        subprocess.run([
-        "chemprop_train",
-        "--data_path", train_path,
-            "--separate_val_path", val_path,
-            "--dataset_type", "classification",
-            "--smiles_column", config["smiles_col"],
-            "--target_columns", config["target_col"],
-            "--save_dir", model_dir,
-            "--num_folds", "1",
-            "--metric", config["metric"],
-            "--epochs", str(config["num_epochs"])
-        ], check=True)
+        
+        safe_run_chemprop_train(train_path,
+                                val_path,
+                                # test_path, #TODO: rewrite to incorporate test_path 
+                                model_dir,
+                                config) 
 
         
         if not os.path.exists(val_scores_path):
@@ -153,19 +163,26 @@ def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
     test_df.to_csv(final_test_csv, index=False)
 
     # Use checkpoint_path for warm-starting from best internal model
-    subprocess.run([
-        "chemprop_train",
-        "--data_path", final_train_csv,
-        "--separate_val_path", final_test_csv,  # treat test set as validation
-        "--save_preds",
-        "--dataset_type", "classification",
-        "--smiles_column", config["smiles_col"],
-        "--target_columns", config["target_col"],
-        "--save_dir", final_model_dir,
-        "--num_folds", "1",
-        "--metric", config["metric"],
-        "--checkpoint_path", os.path.join(best_model_dir, "fold_0", "model_0", "model.pt")
-    ], check=True)
+    # subprocess.run([
+    #     "chemprop_train",
+    #     "--data_path", final_train_csv,
+    #     "--separate_val_path", final_test_csv,  # treat test set as validation
+    #     "--save_preds",
+    #     "--dataset_type", "classification",
+    #     "--smiles_column", config["smiles_col"],
+    #     "--target_columns", config["target_col"],
+    #     "--save_dir", final_model_dir,
+    #     "--num_folds", "1",
+    #     "--metric", config["metric"],
+    #     "--checkpoint_path", os.path.join(best_model_dir, "fold_0", "model_0", "model.pt")
+    # ], check=True)
+    safe_run_chemprop_train(
+                            # train_path,
+                            # val_path,
+                            # test_path, #TODO: rewrite to incorporate test_path, update var names
+                            # model_dir,
+                            config) 
+    
 
     return os.path.join(final_model_dir, "val_preds.csv")
 
@@ -194,6 +211,75 @@ def evaluate_predictions(preds_csv, config):
         raise ValueError(f"Unsupported metric: {config['metric']}")
 
     return {config["metric"]: metric_val}
+
+
+def run_kfold_cv(config):
+    df = pd.read_csv(config["dataset_path"])
+    skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
+
+    use_holdout = config.get("holdout_test_path") is not None
+
+    if use_holdout:
+        print("🧪 Using a held-out test set for evaluation across all folds.")
+        test_df = pd.read_csv(config["holdout_test_path"])
+    else:
+        print("⚠️ No held-out test set provided — each fold will be evaluated on its own validation split.")
+
+    fold_metrics = []
+
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(df, df[config["target_col"]])):
+        print(f"🔁 Fold {fold_idx + 1}/{config['external_folds']}")
+
+        train_df = df.iloc[train_idx].reset_index(drop=True)
+        val_df = df.iloc[val_idx].reset_index(drop=True)
+
+        fold_dir = os.path.join(config["base_dir"], f"kfold_{fold_idx}")
+        os.makedirs(fold_dir, exist_ok=True)
+
+        train_path = os.path.join(fold_dir, "train.csv")
+        val_path = os.path.join(fold_dir, "val.csv")
+        test_path = os.path.join(fold_dir, "test.csv")
+
+        # Save train and val normally
+        train_df.to_csv(train_path, index=False)
+        val_df.to_csv(val_path, index=False)
+
+        if use_holdout:
+            test_df.to_csv(test_path, index=False)
+        else:
+            # Reuse validation set for testing if no holdout provided
+            val_df.to_csv(test_path, index=False)
+
+        model_dir = os.path.join(fold_dir, "model")
+
+        # Use patched Chemprop call
+        safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config)
+
+        preds_path = os.path.join(model_dir, "val_preds.csv")
+        preds = pd.read_csv(preds_path)
+
+        y_true = test_df[config["target_col"]] if use_holdout else val_df[config["target_col"]]
+        y_score = preds.get("prediction", preds[config["target_col"]])
+        y_pred = (y_score >= 0.5).astype(int)
+
+        metrics = {
+            "auc_roc": roc_auc_score(y_true, y_score),
+            "auc_pr": average_precision_score(y_true, y_score),
+            "f1": f1_score(y_true, y_pred)
+        }
+
+        fold_metrics.append(metrics)
+        print(f"✅ Fold {fold_idx} metrics: {metrics}")
+
+    metrics_df = pd.DataFrame(fold_metrics)
+    metrics_df.to_csv(os.path.join(config["base_dir"], "kfold_metrics.csv"), index=False)
+
+    print("\n📊 Final K-Fold CV Summary:")
+    for metric in metrics_df.columns:
+        mean = metrics_df[metric].mean()
+        stderr = sem(metrics_df[metric])
+        ci = t.ppf((1 + 0.95) / 2., len(metrics_df[metric]) - 1) * stderr
+        print(f"{metric.upper()}: {mean:.3f} ± {ci:.3f}")
 
 
 def run_nested_cv(config):
@@ -248,6 +334,9 @@ if __name__ == "__main__":
     parser.add_argument("--smiles_col", type=str, default=default_config["smiles_col"])
     parser.add_argument("--target_col", type=str, default=default_config["target_col"])
     parser.add_argument("--seed", type=int, default=default_config["seed"])
+    parser.add_argument("--holdout_test_path", type=str, default=None,
+                    help="Optional path to a held-out test set. If provided, all folds will evaluate on this.")
+
 
     args = parser.parse_args()
     config = vars(args)
