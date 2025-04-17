@@ -21,7 +21,8 @@ default_config = {
     "target_col": "ACTIVITY",
     "seed": 42,
     "use_rdkit_features": False,
-    "scale_rdkit_features": True
+    "scale_rdkit_features": True,
+    "hyperparams_path": "hyperparameters.json"
 }
 
 
@@ -60,7 +61,9 @@ def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config):
         "--save_dir", save_dir,
         "--num_folds", "1",
         "--metric", config["metric"],
-        "--epochs", str(config["num_epochs"])
+        "--epochs", str(config["num_epochs"]),
+        "--config_path", config["hyperparams_path"]
+
     ] + patch_config_for_rdkit(config)
     subprocess.run(command, check=True)
 
@@ -112,7 +115,7 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
                 "--test_path", val_path,
                 "--checkpoint_path", os.path.join(model_dir, "fold_0", "model_0", "model.pt"),
                 "--preds_path", val_preds_path,
-                "--smiles_column", config["smiles_col"] #TODO: add rdkit config
+                "--smiles_column", config["smiles_col"] #TODO: add rdkit config, hyperparams
             ], check=True)
 
             val_df = pd.read_csv(val_path)
@@ -436,8 +439,10 @@ if __name__ == "__main__":
     parser.add_argument("--holdout_test_path", type=str, default=None,
                     help="Optional path to a held-out test set. If provided, all folds will evaluate on this.")
     parser.add_argument("--cv_mode", type=str, default="nested", choices=["nested", "kfold"],
-    help="Choose between 'nested' or 'kfold' cross-validation strategies"
-)
+    help="Choose between 'nested' or 'kfold' cross-validation strategies",)
+    parser.add_argument("--use_rdkit_features", action="store_true", help="Use RDKit 2D normalized features"),
+    parser.add_argument("--scale_rdkit_features", action="store_true", default=True, help="Normalize RDKit features (default: True)"),
+    parser.add_argument("--config_path", type=str, default=default_config["hyperparams_path"])
 
 
     args = parser.parse_args()
