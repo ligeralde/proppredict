@@ -57,8 +57,41 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             "--metric", "auc"
         ], check=True)
 
+        val_scores_path = os.path.join(model_dir, "val_scores.json")
+        if not os.path.exists(val_scores_path):
+            print(f"⚠️ val_scores.json not found for int_{int_fold_idx} — trying manual prediction")
+
+            val_preds_path = os.path.join(model_dir, "val_preds.csv")
+
+            subprocess.run([
+                "chemprop_predict",
+                "--test_path", val_path,
+                "--checkpoint_dir", model_dir,
+                "--preds_path", val_preds_path,
+                "--smiles_column", config["smiles_col"],
+                "--checkpoint_suffix", ""
+            ], check=True)
+
+            val_df = pd.read_csv(val_path)
+            preds = pd.read_csv(val_preds_path)
+
+            if "prediction" in preds.columns:
+                y_true = val_df[config["target_col"]]
+                y_score = preds["prediction"]
+                try:
+                    auc_val = roc_auc_score(y_true, y_score)
+                    with open(val_scores_path, "w") as f:
+                        f.write(f'{{"auc": {auc_val:.4f}}}')
+                    print(f"✅ Manually computed and saved val AUC: {auc_val:.4f}")
+                except Exception as e:
+                    print(f"❌ Failed to compute AUC manually: {e}")
+                    continue
+            else:
+                print("❌ Prediction column missing from manual prediction output")
+                continue
+
         try:
-            scores = pd.read_json(os.path.join(model_dir, "val_scores.json"), typ='series')
+            scores = pd.read_json(val_scores_path, typ='series')
             if scores['auc'] > best_score:
                 best_score = scores['auc']
                 best_model_dir = model_dir
@@ -113,8 +146,8 @@ def evaluate_predictions(preds_csv, config):
 
 def run_nested_cv(config):
     df = pd.read_csv(config["dataset_path"])
-    with open("external_cv_splits.pkl", "rb") as f:
-        splits = pickle.load(f)
+    skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
+    splits = list(skf.split(df, df[config["target_col"]]))
 
     external_metrics = []
 
