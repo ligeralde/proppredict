@@ -289,38 +289,31 @@ def run_kfold_cv(config):
 
 
 # Compute mean and 95% CI for each metric
-    summary = {}
+    # === Compute summary metrics with confidence intervals ===
+    summary_rows = []
     for metric in metrics_df.columns:
-        mean = metrics_df[metric].mean()
-        stderr = sem(metrics_df[metric])
-        ci = t.ppf((1 + 0.95) / 2., len(metrics_df[metric]) - 1) * stderr
-        summary[metric] = {
-            "mean": mean,
-            "ci_lower": mean - ci,
-            "ci_upper": mean + ci
-        }
+        values = metrics_df[metric]
+        mean = values.mean()
+        stderr = sem(values)
+        ci = t.ppf((1 + 0.95) / 2., len(values) - 1) * stderr
+        ci_low = mean - ci
+        ci_high = mean + ci
 
-    # Append the CI rows to the DataFrame (optional: add label column)
-    summary_df = pd.DataFrame(summary).T.reset_index().rename(columns={"index": "metric"})
-    summary_df["stat"] = ["mean", "ci_lower", "ci_upper"]
+        summary_rows.append({
+            "Metric": metric.upper(),
+            "Mean": round(mean, 4),
+            "CI lower": round(ci_low, 4),
+            "CI upper": round(ci_high, 4)
+        })
 
-    # Reformat to append to bottom of metrics_df
-    summary_df = summary_df.pivot(index="metric", columns="stat").reset_index()
-    # Flatten MultiIndex columns: ('auc_roc', 'mean') → 'auc_roc_mean'
-    summary_df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in summary_df.columns]
-
-
-
-    # Save full file with raw fold metrics + CI summary
-    metrics_path = os.path.join(config["base_dir"], "kfold_metrics.csv")
-    combined_df = pd.concat([metrics_df, summary_df], ignore_index=True)
-    combined_df.to_csv(metrics_path, index=False)
+    summary_df = pd.DataFrame(summary_rows)
+    summary_path = os.path.join(config["base_dir"], "kfold_metrics_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
+    print(f"\n💾 Saved summary metrics with CIs to {summary_path}")
 
 
-    print(f"\n💾 Saved detailed fold metrics with CI summary to {metrics_path}")
     print("\n📊 Final K-Fold CV Summary:")
-    for metric, stats in summary.items():
-        print(f"{metric.upper()}: {stats['mean']:.3f} (95% CI: {stats['ci_lower']:.3f}–{stats['ci_upper']:.3f})")
+    print(summary_df.to_string(index=False))
 
 
 
