@@ -139,7 +139,7 @@ def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
     final_dir = os.path.join(ext_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
 
-    # Combine the exact internal train/val split used in best_model_dir
+    # Combine the train and val splits from the best internal model
     best_int_dir = os.path.dirname(best_model_dir)
     best_train_df = pd.read_csv(os.path.join(best_int_dir, "train.csv"))
     best_val_df = pd.read_csv(os.path.join(best_int_dir, "val.csv"))
@@ -152,20 +152,23 @@ def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
     combined_train_df.to_csv(final_train_csv, index=False)
     test_df.to_csv(final_test_csv, index=False)
 
+    # Use checkpoint_path for warm-starting from best internal model
     subprocess.run([
         "chemprop_train",
         "--data_path", final_train_csv,
-        "--separate_test_path", final_test_csv,
+        "--separate_val_path", final_test_csv,  # treat test set as validation
         "--save_preds",
         "--dataset_type", "classification",
         "--smiles_column", config["smiles_col"],
         "--target_columns", config["target_col"],
         "--save_dir", final_model_dir,
         "--num_folds", "1",
-        "--metric", config["metric"]
+        "--metric", config["metric"],
+        "--checkpoint_path", os.path.join(best_model_dir, "fold_0", "model_0", "model.pt")
     ], check=True)
 
-    return os.path.join(final_model_dir, "test_preds.csv")
+    return os.path.join(final_model_dir, "val_preds.csv")
+
 
 
 def evaluate_predictions(preds_csv, config):
