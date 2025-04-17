@@ -305,13 +305,14 @@ def run_kfold_cv(config):
     summary_df["stat"] = ["mean", "ci_lower", "ci_upper"]
 
     # Reformat to append to bottom of metrics_df
-    summary_rows = summary_df.set_index(["stat", "metric"]).unstack().T.reset_index()
-    summary_rows.columns = ["metric"] + [f"{stat}" for stat in ["mean", "ci_lower", "ci_upper"]]
+    summary_df = summary_df.pivot(index="metric", columns="stat").reset_index()
+    summary_df.columns = ["metric", "ci_lower", "ci_upper", "mean"]  # or sort as you prefer
+
 
     # Save full file with raw fold metrics + CI summary
-    full_path = os.path.join(config["base_dir"], "kfold_metrics.csv")
-    combined_df = pd.concat([metrics_df, summary_rows], ignore_index=True)
-    combined_df.to_csv(full_path, index=False)
+    combined_df = pd.concat([metrics_df, summary_df], ignore_index=True)
+    combined_df.to_csv(os.path.join(config["base_dir"], "kfold_metrics.csv"), index=False)
+
 
     print(f"\n💾 Saved detailed fold metrics with CI summary to {full_path}")
     print("\n📊 Final K-Fold CV Summary:")
