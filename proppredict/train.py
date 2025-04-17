@@ -135,15 +135,21 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
     return best_model_dir
 
 
-def refit_final_model(train_val_df, test_df, ext_dir, config):
+def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
     final_dir = os.path.join(ext_dir, "final")
     os.makedirs(final_dir, exist_ok=True)
+
+    # Combine the exact internal train/val split used in best_model_dir
+    best_int_dir = os.path.dirname(best_model_dir)
+    best_train_df = pd.read_csv(os.path.join(best_int_dir, "train.csv"))
+    best_val_df = pd.read_csv(os.path.join(best_int_dir, "val.csv"))
+    combined_train_df = pd.concat([best_train_df, best_val_df], ignore_index=True)
 
     final_train_csv = os.path.join(final_dir, "train.csv")
     final_test_csv = os.path.join(final_dir, "test.csv")
     final_model_dir = os.path.join(final_dir, "model")
 
-    train_val_df.to_csv(final_train_csv, index=False)
+    combined_train_df.to_csv(final_train_csv, index=False)
     test_df.to_csv(final_test_csv, index=False)
 
     subprocess.run([
@@ -209,7 +215,7 @@ def run_nested_cv(config):
         best_model_dir = run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config)
 
         print(f"🔄 Re-training best model for ext_{ext_fold_idx}...")
-        preds_csv = refit_final_model(train_val_df, test_df, ext_dir, config)
+        preds_csv = refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir)
 
         print(f"📊 Evaluating predictions for ext_{ext_fold_idx}...")
         metrics = evaluate_predictions(preds_csv, config)
