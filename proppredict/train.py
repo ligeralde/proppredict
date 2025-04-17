@@ -226,7 +226,7 @@ def run_kfold_cv(config):
         print("⚠️ No held-out test set provided — each fold will be evaluated on its own validation split.")
 
     fold_metrics = []
-
+    all_preds = []
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(df, df[config["target_col"]])):
         print(f"🔁 Fold {fold_idx + 1}/{config['external_folds']}")
 
@@ -281,11 +281,26 @@ def run_kfold_cv(config):
             "auc_pr": average_precision_score(y_true, y_score),
             "f1": f1_score(y_true, y_pred)
         }
+        # Optional: attach SMILES and prediction details for curve plotting
+        fold_preds_df = pd.DataFrame({
+            "fold": fold_idx,
+            "SMILES": preds.get("SMILES", None),
+            "y_true": y_true,
+            "y_score": y_score
+        })
+        all_preds.append(fold_preds_df)
+
 
         fold_metrics.append(metrics)
         print(f"✅ Fold {fold_idx} metrics: {metrics}")
+        
 
     metrics_df = pd.DataFrame(fold_metrics)
+
+    # Save per-sample predictions for plotting
+    preds_df = pd.concat(all_preds, ignore_index=True)
+    preds_df.to_csv(os.path.join(config["base_dir"], "kfold_predictions.csv"), index=False)
+
 
 
 # Compute mean and 95% CI for each metric
