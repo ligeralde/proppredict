@@ -42,10 +42,10 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             try:
                 scores = pd.read_json(val_scores_path, typ='series')
                 if scores[config["metric"]] > best_score:
-                    best_score = scores['auc']
+                    best_score = scores[config["metric"]]
                     best_model_dir = model_dir
             except Exception as e:
-                print(f"❌ Failed to read existing AUC for int_{int_fold_idx}: {e}")
+                print(f"❌ Failed to read existing score for int_{int_fold_idx}: {e}")
             continue
         int_dir = os.path.join(ext_dir, f"int_{int_fold_idx}")
         os.makedirs(int_dir, exist_ok=True)
@@ -72,7 +72,7 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             "--epochs", str(config["num_epochs"])
         ], check=True)
 
-        val_scores_path = os.path.join(model_dir, "val_scores.json")
+        
         if not os.path.exists(val_scores_path):
             print(f"⚠️ val_scores.json not found for int_{int_fold_idx} — trying manual prediction")
 
@@ -89,25 +89,39 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             val_df = pd.read_csv(val_path)
             preds = pd.read_csv(val_preds_path)
 
-            if "prediction" in preds.columns:
-                y_true = val_df[config["target_col"]]
-                y_score = preds["prediction"]
-                try:
-                    auc_val = roc_auc_score(y_true, y_score)
-                    with open(val_scores_path, "w") as f:
-                        f.write(f'{{"auc": {auc_val:.4f}}}')
-                    print(f"✅ Manually computed and saved val AUC: {auc_val:.4f}")
-                except Exception as e:
-                    print(f"❌ Failed to compute AUC manually: {e}")
-                    continue
-            else:
-                print("❌ Prediction column missing from manual prediction output")
+            # if "prediction" in preds.columns:
+            y_true = val_df[config["target_col"]]
+            y_score = preds.get("prediction", preds[config["target_col"]])
+
+            try:
+                # auc_val = roc_auc_score(y_true, y_score)
+                # with open(val_scores_path, "w") as f:
+                #     f.write(f'{{"auc": {auc_val:.4f}}}')
+                # print(f"✅ Manually computed and saved val AUC: {auc_val:.4f}")
+                if config["metric"] == "auc":
+                    metric_val = roc_auc_score(y_true, y_score)
+                elif config["metric"] == "f1":
+                    y_pred = (y_score >= 0.5).astype(int)
+                    metric_val = f1_score(y_true, y_pred)
+                elif config["metric"] == "auc_pr":
+                    metric_val = average_precision_score(y_true, y_score)
+                else:
+                    raise ValueError(f"Unsupported metric: {config['metric']}")
+                with open(val_scores_path, "w") as f:
+                    f.write(f'{{"{config["metric"]}": {metric_val:.4f}}}')
+                    print(f"✅ Manually computed and saved val {config['metric'].upper()}: {metric_val:.4f}")
+
+            except Exception as e:
+                print(f"❌ Failed to compute score manually: {e}")
                 continue
+            # else:
+            #     print("❌ Prediction column missing from manual prediction output")
+            #     continue
 
         try:
             scores = pd.read_json(val_scores_path, typ='series')
             if scores[config["metric"]] > best_score:
-                best_score = scores['auc']
+                best_score = scores[config["metric"]]
                 best_model_dir = model_dir
         except Exception as e:
             print(f"❌ Failed to read AUC for int_{int_fold_idx}: {e}")
@@ -139,7 +153,7 @@ def refit_final_model(train_val_df, test_df, ext_dir, config):
         "--target_columns", config["target_col"],
         "--save_dir", final_model_dir,
         "--num_folds", "1",
-        "--metric", "auc"
+        "--metric", config["metric"]
     ], check=True)
 
     return os.path.join(final_model_dir, "test_preds.csv")
@@ -148,7 +162,10 @@ def refit_final_model(train_val_df, test_df, ext_dir, config):
 def evaluate_predictions(preds_csv, config):
     test_preds = pd.read_csv(preds_csv)
     y_true = test_preds[config["target_col"]]
-    y_score = test_preds["prediction"]
+    # y_score = test_preds[config["target_col"]]
+    if "prediction" not in test_preds.columns and config["target_col"] not in test_preds.columns:
+        raise ValueError("❌ No prediction column found in test predictions.")
+    y_score = test_preds.get("prediction", test_preds[config["target_col"]])
     y_pred = (y_score >= 0.5).astype(int)
 
     if config["metric"] == "auc":
