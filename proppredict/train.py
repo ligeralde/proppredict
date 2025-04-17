@@ -254,8 +254,8 @@ def run_kfold_cv(config):
 
         # Train the model using all 3 datasets
         safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config)
-        
-        redundant_preds = os.path.join(model_dir, "fold_0", "model_0", "test_preds.csv")
+
+        redundant_preds = os.path.join(model_dir, "fold_0", "test_preds.csv")
         if os.path.exists(redundant_preds):
             os.remove(redundant_preds)
 
@@ -286,14 +286,38 @@ def run_kfold_cv(config):
         print(f"✅ Fold {fold_idx} metrics: {metrics}")
 
     metrics_df = pd.DataFrame(fold_metrics)
-    metrics_df.to_csv(os.path.join(config["base_dir"], "kfold_metrics.csv"), index=False)
 
-    print("\n📊 Final K-Fold CV Summary:")
+
+# Compute mean and 95% CI for each metric
+    summary = {}
     for metric in metrics_df.columns:
         mean = metrics_df[metric].mean()
         stderr = sem(metrics_df[metric])
         ci = t.ppf((1 + 0.95) / 2., len(metrics_df[metric]) - 1) * stderr
-        print(f"{metric.upper()}: {mean:.3f} ± {ci:.3f}")
+        summary[metric] = {
+            "mean": mean,
+            "ci_lower": mean - ci,
+            "ci_upper": mean + ci
+        }
+
+    # Append the CI rows to the DataFrame (optional: add label column)
+    summary_df = pd.DataFrame(summary).T.reset_index().rename(columns={"index": "metric"})
+    summary_df["stat"] = ["mean", "ci_lower", "ci_upper"]
+
+    # Reformat to append to bottom of metrics_df
+    summary_rows = summary_df.set_index(["stat", "metric"]).unstack().T.reset_index()
+    summary_rows.columns = ["metric"] + [f"{stat}" for stat in ["mean", "ci_lower", "ci_upper"]]
+
+    # Save full file with raw fold metrics + CI summary
+    full_path = os.path.join(config["base_dir"], "kfold_metrics.csv")
+    combined_df = pd.concat([metrics_df, summary_rows], ignore_index=True)
+    combined_df.to_csv(full_path, index=False)
+
+    print(f"\n💾 Saved detailed fold metrics with CI summary to {full_path}")
+    print("\n📊 Final K-Fold CV Summary:")
+    for metric, stats in summary.items():
+        print(f"{metric.upper()}: {stats['mean']:.3f} (95% CI: {stats['ci_lower']:.3f}–{stats['ci_upper']:.3f})")
+
 
 
 def run_nested_cv(config):
