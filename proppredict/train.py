@@ -306,7 +306,9 @@ def run_kfold_cv(config):
 
     # Reformat to append to bottom of metrics_df
     summary_df = summary_df.pivot(index="metric", columns="stat").reset_index()
-    summary_df.columns = ["metric", "ci_lower", "ci_upper", "mean"]  # or sort as you prefer
+    # Flatten MultiIndex columns: ('auc_roc', 'mean') → 'auc_roc_mean'
+    summary_df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in summary_df.columns]
+
 
 
     # Save full file with raw fold metrics + CI summary
