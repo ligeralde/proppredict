@@ -310,11 +310,12 @@ def run_kfold_cv(config):
 
 
     # Save full file with raw fold metrics + CI summary
+    metrics_path = os.path.join(config["base_dir"], "kfold_metrics.csv")
     combined_df = pd.concat([metrics_df, summary_df], ignore_index=True)
-    combined_df.to_csv(os.path.join(config["base_dir"], "kfold_metrics.csv"), index=False)
+    combined_df.to_csv(metrics_path, index=False)
 
 
-    print(f"\n💾 Saved detailed fold metrics with CI summary to {full_path}")
+    print(f"\n💾 Saved detailed fold metrics with CI summary to {metrics_path}")
     print("\n📊 Final K-Fold CV Summary:")
     for metric, stats in summary.items():
         print(f"{metric.upper()}: {stats['mean']:.3f} (95% CI: {stats['ci_lower']:.3f}–{stats['ci_upper']:.3f})")
