@@ -336,9 +336,16 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=default_config["seed"])
     parser.add_argument("--holdout_test_path", type=str, default=None,
                     help="Optional path to a held-out test set. If provided, all folds will evaluate on this.")
+    parser.add_argument("--cv_mode", type=str, default="nested", choices=["nested", "kfold"],
+    help="Choose between 'nested' or 'kfold' cross-validation strategies"
+)
 
 
     args = parser.parse_args()
     config = vars(args)
 
-    run_nested_cv(config)
+    if config["cv_mode"] == "kfold":
+        run_kfold_cv(config)
+    else:
+        run_nested_cv(config)
+
