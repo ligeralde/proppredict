@@ -216,19 +216,26 @@ def unwrap_smiles_column(preds_csv):
     try:
         df = pd.read_csv(preds_csv)
 
-        # 1. Normalize column name to "SMILES"
+        # Normalize column name first
         if "smiles" in df.columns:
             df.rename(columns={"smiles": "SMILES"}, inplace=True)
 
-        # 2. Unwrap list-like values
+        # Check for list-like entries and force unwrapping + string conversion
         if "SMILES" in df.columns:
-            df["SMILES"] = df["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
+            def force_str(x):
+                if isinstance(x, list) and len(x) > 0:
+                    return str(x[0])
+                elif isinstance(x, list):
+                    return ""
+                return str(x)
+            df["SMILES"] = df["SMILES"].apply(force_str)
 
         df.to_csv(preds_csv, index=False)
-        print(f"🛠️  Unwrapped and normalized SMILES column in: {preds_csv}")
+        print(f"🛠️ Cleaned and unwrapped SMILES in: {preds_csv}")
 
     except Exception as e:
-        print(f"⚠️ Failed to process SMILES in {preds_csv}: {e}")
+        print(f"⚠️ Failed to clean SMILES in {preds_csv}: {e}")
+
 
 
 def run_kfold_cv(config):
