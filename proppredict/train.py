@@ -10,6 +10,7 @@ import pickle
 
 # === CONFIG (defaults, can be overridden via CLI) ===
 default_config = {
+    "metric": "auc",
     "num_epochs": 30,
     "base_dir": "coadd_collins_cv_train_output",
     "dataset_path": "your_dataset.csv",
@@ -40,7 +41,7 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             print(f"⏭️  int_{int_fold_idx} already trained — skipping to val score loading")
             try:
                 scores = pd.read_json(val_scores_path, typ='series')
-                if scores['auc'] > best_score:
+                if scores[config["metric"]] > best_score:
                     best_score = scores['auc']
                     best_model_dir = model_dir
             except Exception as e:
@@ -67,7 +68,7 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             "--target_columns", config["target_col"],
             "--save_dir", model_dir,
             "--num_folds", "1",
-            "--metric", "auc",
+            "--metric", config["metric"],
             "--epochs", str(config["num_epochs"])
         ], check=True)
 
@@ -80,10 +81,9 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             subprocess.run([
                 "chemprop_predict",
                 "--test_path", val_path,
-                "--checkpoint_dir", model_dir,
+                "--checkpoint_path", os.path.join(model_dir, "fold_0", "model_0", "model.pt"),
                 "--preds_path", val_preds_path,
-                "--smiles_column", config["smiles_col"],
-                "--checkpoint_suffix", ""
+                "--smiles_column", config["smiles_col"]
             ], check=True)
 
             val_df = pd.read_csv(val_path)
@@ -106,7 +106,7 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
 
         try:
             scores = pd.read_json(val_scores_path, typ='series')
-            if scores['auc'] > best_score:
+            if scores[config["metric"]] > best_score:
                 best_score = scores['auc']
                 best_model_dir = model_dir
         except Exception as e:
@@ -151,11 +151,16 @@ def evaluate_predictions(preds_csv, config):
     y_score = test_preds["prediction"]
     y_pred = (y_score >= 0.5).astype(int)
 
-    return {
-        "auc_roc": roc_auc_score(y_true, y_score),
-        "auc_pr": average_precision_score(y_true, y_score),
-        "f1": f1_score(y_true, y_pred)
-    }
+    if config["metric"] == "auc":
+        metric_val = roc_auc_score(y_true, y_score)
+    elif config["metric"] == "f1":
+        metric_val = f1_score(y_true, y_pred)
+    elif config["metric"] == "auc_pr":
+        metric_val = average_precision_score(y_true, y_score)
+    else:
+        raise ValueError(f"Unsupported metric: {config['metric']}")
+
+    return {config["metric"]: metric_val}
 
 
 def run_nested_cv(config):
@@ -189,6 +194,8 @@ def run_nested_cv(config):
 
     if external_metrics:
         external_df = pd.DataFrame(external_metrics)
+        external_df.to_csv(os.path.join(config["base_dir"], "external_metrics.csv"), index=False)
+        print(f"💾 Saved detailed test metrics to {os.path.join(config['base_dir'], 'external_metrics.csv')}")
         print("\n📊 Final Summary Across External Folds:")
         for metric in external_df.columns:
             mean, (ci_low, ci_high) = mean_ci(external_df[metric])
@@ -199,6 +206,7 @@ def run_nested_cv(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run nested CV with Chemprop")
+    parser.add_argument("--metric", type=str, default=default_config["metric"], choices=["auc", "f1", "auc_pr"], help="Metric to optimize and evaluate")
     parser.add_argument("--num_epochs", type=int, default=default_config["num_epochs"])
     parser.add_argument("--base_dir", type=str, default=default_config["base_dir"])
     parser.add_argument("--dataset_path", type=str, default=default_config["dataset_path"])
