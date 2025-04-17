@@ -10,6 +10,7 @@ import pickle
 
 # === CONFIG (defaults, can be overridden via CLI) ===
 default_config = {
+    "num_epochs": 30,
     "base_dir": "coadd_collins_cv_train_output",
     "dataset_path": "your_dataset.csv",
     "external_folds": 5,
@@ -33,6 +34,18 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
     best_model_dir = None
 
     for int_fold_idx, (int_train_idx, int_val_idx) in enumerate(skf_internal.split(train_val_df, train_val_df[config["target_col"]])):
+        model_dir = os.path.join(ext_dir, f"int_{int_fold_idx}", "model")
+        val_scores_path = os.path.join(model_dir, "val_scores.json")
+        if os.path.exists(val_scores_path):
+            print(f"⏭️  int_{int_fold_idx} already trained — skipping to val score loading")
+            try:
+                scores = pd.read_json(val_scores_path, typ='series')
+                if scores['auc'] > best_score:
+                    best_score = scores['auc']
+                    best_model_dir = model_dir
+            except Exception as e:
+                print(f"❌ Failed to read existing AUC for int_{int_fold_idx}: {e}")
+            continue
         int_dir = os.path.join(ext_dir, f"int_{int_fold_idx}")
         os.makedirs(int_dir, exist_ok=True)
 
@@ -54,7 +67,8 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
             "--target_columns", config["target_col"],
             "--save_dir", model_dir,
             "--num_folds", "1",
-            "--metric", "auc"
+            "--metric", "auc",
+            "--epochs", str(config["num_epochs"])
         ], check=True)
 
         val_scores_path = os.path.join(model_dir, "val_scores.json")
@@ -185,6 +199,7 @@ def run_nested_cv(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run nested CV with Chemprop")
+    parser.add_argument("--num_epochs", type=int, default=default_config["num_epochs"])
     parser.add_argument("--base_dir", type=str, default=default_config["base_dir"])
     parser.add_argument("--dataset_path", type=str, default=default_config["dataset_path"])
     parser.add_argument("--external_folds", type=int, default=default_config["external_folds"])
