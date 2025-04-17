@@ -6,7 +6,8 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
 from scipy.stats import sem, t
 import subprocess
-import pickle
+# import pickle
+import ast
 
 # === CONFIG (defaults, can be overridden via CLI) ===
 default_config = {
@@ -212,29 +213,40 @@ def evaluate_predictions(preds_csv, config):
     return {config["metric"]: metric_val}
 
 
+
+
 def unwrap_smiles_column(preds_csv):
     try:
         df = pd.read_csv(preds_csv)
 
-        # Normalize column name first
+        # Normalize the SMILES column name
         if "smiles" in df.columns:
             df.rename(columns={"smiles": "SMILES"}, inplace=True)
 
-        # Check for list-like entries and force unwrapping + string conversion
-        if "SMILES" in df.columns:
-            def force_str(x):
-                if isinstance(x, list) and len(x) > 0:
-                    return str(x[0])
-                elif isinstance(x, list):
-                    return ""
-                return str(x)
-            df["SMILES"] = df["SMILES"].apply(force_str)
+        # Fix list-like SMILES values: if they are strings that look like lists or actual lists
+        def clean_smiles(val):
+            if isinstance(val, list):
+                return val[0]
+            if isinstance(val, str) and val.startswith("[") and val.endswith("]"):
+                try:
+                    parsed = ast.literal_eval(val)
+                    if isinstance(parsed, list) and len(parsed) > 0:
+                        return parsed[0]
+                except Exception:
+                    return val  # fallback
+            return val
 
-        df.to_csv(preds_csv, index=False)
-        print(f"🛠️ Cleaned and unwrapped SMILES in: {preds_csv}")
+        if "SMILES" in df.columns:
+            df["SMILES"] = df["SMILES"].apply(clean_smiles)
+            df.to_csv(preds_csv, index=False)
+            print(f"🛠️ Fixed SMILES format in: {preds_csv}")
+        else:
+            print(f"⚠️ No SMILES column found in: {preds_csv}")
 
     except Exception as e:
-        print(f"⚠️ Failed to clean SMILES in {preds_csv}: {e}")
+        print(f"❌ Failed to fix SMILES in {preds_csv}: {e}")
+
+
 
 
 
