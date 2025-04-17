@@ -254,9 +254,23 @@ def run_kfold_cv(config):
 
         # Train the model using all 3 datasets
         safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config)
+        
+        redundant_preds = os.path.join(model_dir, "fold_0", "model_0", "test_preds.csv")
+        if os.path.exists(redundant_preds):
+            os.remove(redundant_preds)
 
-        preds_path = os.path.join(model_dir, "val_preds.csv")
+        # Read predictions on the test set
+        preds_path = os.path.join(model_dir, "test_preds.csv")
         preds = pd.read_csv(preds_path)
+
+        # Fix column name if needed
+        if "smiles" in preds.columns:
+            preds.rename(columns={"smiles": "SMILES"}, inplace=True)
+
+        # Unwrap lists in SMILES column if necessary
+        if preds["SMILES"].apply(lambda x: isinstance(x, list)).any():
+            preds["SMILES"] = preds["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
+
 
         y_true = test_df[config["target_col"]] if use_holdout else val_df[config["target_col"]]
         y_score = preds.get("prediction", preds[config["target_col"]])
