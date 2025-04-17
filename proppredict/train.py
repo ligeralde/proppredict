@@ -239,18 +239,20 @@ def run_kfold_cv(config):
         train_path = os.path.join(fold_dir, "train.csv")
         val_path = os.path.join(fold_dir, "val.csv")
 
+        # 🔧 Save both train and val CSVs
+        train_df.to_csv(train_path, index=False)
         val_df.to_csv(val_path, index=False)
 
         if use_holdout:
             test_path = os.path.join(fold_dir, "test.csv")
             test_df.to_csv(test_path, index=False)
         else:
-            test_path = val_path  # reuse the same file to avoid duplication
+            test_path = val_path  # reuse val.csv as test
             print(f"🔁 Using val.csv as both validation and test set for fold {fold_idx}")
 
         model_dir = os.path.join(fold_dir, "model")
 
-        # Use patched Chemprop call
+        # Train the model using all 3 datasets
         safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config)
 
         preds_path = os.path.join(model_dir, "val_preds.csv")
