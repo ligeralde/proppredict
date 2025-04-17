@@ -98,22 +98,21 @@ def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
                 y_score = y_score.fillna(0.0)  # or drop rows
 
             try:
-                # auc_val = roc_auc_score(y_true, y_score)
-                # with open(val_scores_path, "w") as f:
-                #     f.write(f'{{"auc": {auc_val:.4f}}}')
-                # print(f"✅ Manually computed and saved val AUC: {auc_val:.4f}")
-                if config["metric"] == "auc":
-                    metric_val = roc_auc_score(y_true, y_score)
-                elif config["metric"] == "f1":
-                    y_pred = (y_score >= 0.5).astype(int)
-                    metric_val = f1_score(y_true, y_pred)
-                elif config["metric"] == "auc_pr":
-                    metric_val = average_precision_score(y_true, y_score)
-                else:
-                    raise ValueError(f"Unsupported metric: {config['metric']}")
+       
+                
+                # if config["metric"] == "auc":
+                roc_auc = roc_auc_score(y_true, y_score)
+                # elif config["metric"] == "f1":
+                y_pred = (y_score >= 0.5).astype(int)
+                f1 = f1_score(y_true, y_pred)
+                # elif config["metric"] == "auc_pr":
+                auc_pr = average_precision_score(y_true, y_score)
+                # else:
+                    # raise ValueError(f"Unsupported metric: {config['metric']}")
                 with open(val_scores_path, "w") as f:
-                    f.write(f'{{"{config["metric"]}": {metric_val:.4f}}}')
-                    print(f"✅ Manually computed and saved val {config['metric'].upper()}: {metric_val:.4f}")
+                    f.write(f'{{"roc_auc": {roc_auc:.4f}, "f1": {f1:.4f}, "auc_pr": {auc_pr:.4f}}}')
+                print(f"✅ Manually computed and saved val scores: AUC={roc_auc:.4f}, F1={f1:.4f}, PR={auc_pr:.4f}")
+
 
             except Exception as e:
                 print(f"❌ Failed to compute score manually: {e}")
