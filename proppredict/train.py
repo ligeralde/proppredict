@@ -187,7 +187,6 @@ def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
     return os.path.join(final_model_dir, "val_preds.csv")
 
 
-
 def evaluate_predictions(preds_csv, config):
     test_preds = pd.read_csv(preds_csv)
     y_true = test_preds[config["target_col"]]
@@ -211,6 +210,25 @@ def evaluate_predictions(preds_csv, config):
         raise ValueError(f"Unsupported metric: {config['metric']}")
 
     return {config["metric"]: metric_val}
+
+
+def unwrap_smiles_column(preds_csv):
+    try:
+        df = pd.read_csv(preds_csv)
+
+        # 1. Normalize column name to "SMILES"
+        if "smiles" in df.columns:
+            df.rename(columns={"smiles": "SMILES"}, inplace=True)
+
+        # 2. Unwrap list-like values
+        if "SMILES" in df.columns:
+            df["SMILES"] = df["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
+
+        df.to_csv(preds_csv, index=False)
+        print(f"🛠️  Unwrapped and normalized SMILES column in: {preds_csv}")
+
+    except Exception as e:
+        print(f"⚠️ Failed to process SMILES in {preds_csv}: {e}")
 
 
 def run_kfold_cv(config):
@@ -261,15 +279,8 @@ def run_kfold_cv(config):
 
         # Read predictions on the test set
         preds_path = os.path.join(model_dir, "test_preds.csv")
+        unwrap_smiles_column(preds_path)
         preds = pd.read_csv(preds_path)
-
-        # 🔧 Fix SMILES list wrapping
-        if "SMILES" in preds.columns:
-            preds["SMILES"] = preds["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
-
-        # Fix column name if needed
-        if "smiles" in preds.columns:
-            preds.rename(columns={"smiles": "SMILES"}, inplace=True)
 
 
         y_true = test_df[config["target_col"]] if use_holdout else val_df[config["target_col"]]
