@@ -247,9 +247,6 @@ def unwrap_smiles_column(preds_csv):
         print(f"❌ Failed to fix SMILES in {preds_csv}: {e}")
 
 
-
-
-
 def run_kfold_cv(config):
     df = pd.read_csv(config["dataset_path"])
     skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
@@ -258,15 +255,15 @@ def run_kfold_cv(config):
 
     if use_holdout:
         print("🧪 Using a held-out test set for evaluation across all folds.")
-        test_df = pd.read_csv(config["holdout_test_path"])
+        test_df_full = pd.read_csv(config["holdout_test_path"])
     else:
         print("⚠️ No held-out test set provided — each fold will be evaluated on its own validation split.")
 
     fold_metrics = []
     all_preds = []
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(df, df[config["target_col"]])):
-        print(f"🔁 Fold {fold_idx + 1}/{config['external_folds']}")
 
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(df, df[config["target_col"]])):
+        print(f"\n🔁 Fold {fold_idx + 1}/{config['external_folds']}")
         train_df = df.iloc[train_idx].reset_index(drop=True)
         val_df = df.iloc[val_idx].reset_index(drop=True)
 
@@ -275,35 +272,46 @@ def run_kfold_cv(config):
 
         train_path = os.path.join(fold_dir, "train.csv")
         val_path = os.path.join(fold_dir, "val.csv")
+        test_path = os.path.join(fold_dir, "test.csv")
+        preds_path = os.path.join(fold_dir, "model", "test_preds.csv")
+        model_dir = os.path.join(fold_dir, "model")
 
-        # 🔧 Save both train and val CSVs
         train_df.to_csv(train_path, index=False)
         val_df.to_csv(val_path, index=False)
 
         if use_holdout:
-            test_path = os.path.join(fold_dir, "test.csv")
+            test_df = test_df_full.copy()
             test_df.to_csv(test_path, index=False)
         else:
-            test_path = val_path  # reuse val.csv as test
+            test_path = val_path
+            test_df = val_df.copy()
             print(f"🔁 Using val.csv as both validation and test set for fold {fold_idx}")
 
-        model_dir = os.path.join(fold_dir, "model")
+        # Skip training if predictions already exist
+        if os.path.exists(preds_path):
+            print(f"✅ Predictions already exist for fold {fold_idx} — skipping training")
+        else:
+            # Train the model
+            safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config)
 
-        # Train the model using all 3 datasets
-        safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config)
-
-        redundant_preds = os.path.join(model_dir, "fold_0", "test_preds.csv")
-        if os.path.exists(redundant_preds):
-            os.remove(redundant_preds)
-
-        # Read predictions on the test set
-        preds_path = os.path.join(model_dir, "test_preds.csv")
+        # Unwrap SMILES and read predictions
         unwrap_smiles_column(preds_path)
         preds = pd.read_csv(preds_path)
 
+        # Ensure SMILES column is named correctly and unwrapped
+        if "smiles" in preds.columns:
+            preds.rename(columns={"smiles": "SMILES"}, inplace=True)
+        preds["SMILES"] = preds["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
 
-        y_true = test_df[config["target_col"]] if use_holdout else val_df[config["target_col"]]
-        y_score = preds.get("prediction", preds[config["target_col"]])
+        # Match predictions to test set rows
+        matched_test_df = test_df[test_df[config["smiles_col"]].isin(preds["SMILES"])].reset_index(drop=True)
+        matched_preds = preds[preds["SMILES"].isin(matched_test_df[config["smiles_col"]])].reset_index(drop=True)
+
+        # Validate alignment
+        assert len(matched_test_df) == len(matched_preds), f"Mismatch: {len(matched_test_df)} true vs {len(matched_preds)} preds"
+
+        y_true = matched_test_df[config["target_col"]]
+        y_score = matched_preds.get("prediction", matched_preds[config["target_col"]])
         y_pred = (y_score >= 0.5).astype(int)
 
         metrics = {
@@ -311,30 +319,25 @@ def run_kfold_cv(config):
             "auc_pr": average_precision_score(y_true, y_score),
             "f1": f1_score(y_true, y_pred)
         }
-        # Optional: attach SMILES and prediction details for curve plotting
+
         fold_preds_df = pd.DataFrame({
             "fold": fold_idx,
-            "SMILES": preds.get("SMILES", None),
+            "SMILES": matched_preds["SMILES"],
             "y_true": y_true,
             "y_score": y_score
         })
         all_preds.append(fold_preds_df)
-
-
         fold_metrics.append(metrics)
+
         print(f"✅ Fold {fold_idx} metrics: {metrics}")
-        
 
-    metrics_df = pd.DataFrame(fold_metrics)
-
-    # Save per-sample predictions for plotting
+    # Save predictions for curve plotting
     preds_df = pd.concat(all_preds, ignore_index=True)
     preds_df.to_csv(os.path.join(config["base_dir"], "kfold_predictions.csv"), index=False)
 
+    # Save metrics with confidence intervals
+    metrics_df = pd.DataFrame(fold_metrics)
 
-
-# Compute mean and 95% CI for each metric
-    # === Compute summary metrics with confidence intervals ===
     summary_rows = []
     for metric in metrics_df.columns:
         values = metrics_df[metric]
@@ -354,12 +357,10 @@ def run_kfold_cv(config):
     summary_df = pd.DataFrame(summary_rows)
     summary_path = os.path.join(config["base_dir"], "kfold_metrics_summary.csv")
     summary_df.to_csv(summary_path, index=False)
+
     print(f"\n💾 Saved summary metrics with CIs to {summary_path}")
-
-
     print("\n📊 Final K-Fold CV Summary:")
     print(summary_df.to_string(index=False))
-
 
 
 def run_nested_cv(config):
