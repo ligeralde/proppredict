@@ -263,13 +263,13 @@ def run_kfold_cv(config):
         preds_path = os.path.join(model_dir, "test_preds.csv")
         preds = pd.read_csv(preds_path)
 
+        # 🔧 Fix SMILES list wrapping
+        if "SMILES" in preds.columns:
+            preds["SMILES"] = preds["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
+
         # Fix column name if needed
         if "smiles" in preds.columns:
             preds.rename(columns={"smiles": "SMILES"}, inplace=True)
-
-        # Unwrap lists in SMILES column if necessary
-        if preds["SMILES"].apply(lambda x: isinstance(x, list)).any():
-            preds["SMILES"] = preds["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
 
 
         y_true = test_df[config["target_col"]] if use_holdout else val_df[config["target_col"]]
