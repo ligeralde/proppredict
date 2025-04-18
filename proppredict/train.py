@@ -8,6 +8,11 @@ from scipy.stats import sem, t
 import subprocess
 # import pickle
 import ast
+import threading
+import time
+import shutil
+from multiprocessing import Process, cpu_count
+
 
 # === CONFIG (defaults, can be overridden via CLI) ===
 default_config = {
@@ -21,8 +26,9 @@ default_config = {
     "target_col": "ACTIVITY",
     "seed": 42,
     "use_rdkit_features": False,
-    "scale_rdkit_features": True,
-    "hyperparams_path": "hyperparameters.json"
+    "scale_rdkit_features": False,
+    "hyperparams_path": None,
+    "num_gpus": 2
 }
 
 
@@ -48,7 +54,26 @@ def mean_ci(scores, confidence=0.95):
     ci_range = t.ppf((1 + confidence) / 2., len(scores) - 1) * stderr
     return mean, (mean - ci_range, mean + ci_range)
 
-def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config):
+
+def monitor_gpu(gpu_id, stop_event):
+    while not stop_event.is_set():
+        try:
+            output = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used",
+                 "--format=csv,noheader,nounits"],
+                text=True
+            )
+            lines = output.strip().split("\n")
+            for line in lines:
+                index, name, util, mem = [x.strip() for x in line.split(",")]
+                if int(index) == gpu_id:
+                    print(f"🖥️  [GPU {index}] {name} — Utilization: {util}% — Memory: {mem} MiB")
+        except Exception as e:
+            print(f"⚠️ GPU monitor failed: {e}")
+        time.sleep(10)
+
+
+def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config, gpu_id=0):
     command = [
         "chemprop_train",
         "--data_path", train_path,
@@ -62,10 +87,29 @@ def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config):
         "--num_folds", "1",
         "--metric", config["metric"],
         "--epochs", str(config["num_epochs"]),
-        "--config_path", config["hyperparams_path"]
-
     ] + patch_config_for_rdkit(config)
-    subprocess.run(command, check=True)
+
+    if config.get("hyperparams_path") and config["hyperparams_path"] != "default":
+        command.extend(["--config_path", config["hyperparams_path"]])
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    print(f"🚀 Starting Chemprop on GPU {gpu_id} with command:\n{' '.join(command)}\n")
+
+    # Start GPU monitoring in a background thread
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(target=monitor_gpu, args=(gpu_id, stop_event))
+    monitor_thread.start()
+
+    try:
+        subprocess.run(command, check=True, env=env)
+    finally:
+        stop_event.set()
+        monitor_thread.join()
+        print(f"✅ Finished training on GPU {gpu_id}\n")
+
+
 
 def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
     skf_internal = StratifiedKFold(n_splits=config["internal_folds"], shuffle=True, random_state=ext_fold_idx)
@@ -268,68 +312,84 @@ def unwrap_smiles_column(preds_csv):
         print(f"❌ Failed to fix SMILES in {preds_csv}: {e}")
 
 
+
+def run_fold_parallel(fold_idx, train_df, val_df, test_df, config, gpu_id):
+    fold_dir = os.path.join(config["base_dir"], f"kfold_{fold_idx}")
+    os.makedirs(fold_dir, exist_ok=True)
+
+    train_path = os.path.join(fold_dir, "train.csv")
+    val_path = os.path.join(fold_dir, "val.csv")
+    model_dir = os.path.join(fold_dir, "model")
+    preds_path = os.path.join(model_dir, "test_preds.csv")
+
+    train_df.to_csv(train_path, index=False)
+    val_df.to_csv(val_path, index=False)
+
+    if not os.path.exists(preds_path):
+        # Use val_path as test_path if same
+        test_path = val_path if test_df.equals(val_df) else os.path.join(fold_dir, "test.csv")
+        if not test_df.equals(val_df):
+            test_df.to_csv(test_path, index=False)
+
+        safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config, gpu_id=gpu_id)
+
+    unwrap_smiles_column(preds_path)
+
+
+
 def run_kfold_cv(config):
     df = pd.read_csv(config["dataset_path"])
     skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
 
     use_holdout = config.get("holdout_test_path") is not None
-
     if use_holdout:
-        print("🧪 Using a held-out test set for evaluation across all folds.")
+        print("🧑‍🔬 Using held-out test set.")
         test_df_full = pd.read_csv(config["holdout_test_path"])
     else:
-        print("⚠️ No held-out test set provided — each fold will be evaluated on its own validation split.")
+        print("⚠️ No held-out test set — validation used as test.")
 
-    fold_metrics = []
     all_preds = []
+    fold_metrics = []
+    max_concurrent = config["num_gpus"]
+    active_processes = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(df, df[config["target_col"]])):
-        print(f"\n🔁 Fold {fold_idx + 1}/{config['external_folds']}")
         train_df = df.iloc[train_idx].reset_index(drop=True)
         val_df = df.iloc[val_idx].reset_index(drop=True)
+        test_df = test_df_full.copy() if use_holdout else val_df.copy()
 
+        gpu_id = fold_idx % config["num_gpus"]
+
+        p = Process(target=run_fold_parallel, args=(fold_idx, train_df, val_df, test_df, config, gpu_id))
+        p.start()
+        active_processes.append(p)
+
+        if len(active_processes) == max_concurrent:
+            for proc in active_processes:
+                proc.join()
+            active_processes = []
+
+    for proc in active_processes:
+        proc.join()
+
+    print("✅ All folds finished. Starting evaluation...")
+
+    for fold_idx in range(config["external_folds"]):
         fold_dir = os.path.join(config["base_dir"], f"kfold_{fold_idx}")
-        os.makedirs(fold_dir, exist_ok=True)
-
-        train_path = os.path.join(fold_dir, "train.csv")
         val_path = os.path.join(fold_dir, "val.csv")
-        test_path = os.path.join(fold_dir, "test.csv")
+        test_path = val_path if not use_holdout else os.path.join(fold_dir, "test.csv")
         preds_path = os.path.join(fold_dir, "model", "test_preds.csv")
-        model_dir = os.path.join(fold_dir, "model")
 
-        train_df.to_csv(train_path, index=False)
-        val_df.to_csv(val_path, index=False)
-
-        if use_holdout:
-            test_df = test_df_full.copy()
-            test_df.to_csv(test_path, index=False)
-        else:
-            test_path = val_path
-            test_df = val_df.copy()
-            print(f"🔁 Using val.csv as both validation and test set for fold {fold_idx}")
-
-        # Skip training if predictions already exist
-        if os.path.exists(preds_path):
-            print(f"✅ Predictions already exist for fold {fold_idx} — skipping training")
-        else:
-            # Train the model
-            safe_run_chemprop_train(train_path, val_path, test_path, model_dir, config)
-
-        # Unwrap SMILES and read predictions
-        unwrap_smiles_column(preds_path)
+        test_df = pd.read_csv(test_path)
         preds = pd.read_csv(preds_path)
-
-        # Ensure SMILES column is named correctly and unwrapped
         if "smiles" in preds.columns:
             preds.rename(columns={"smiles": "SMILES"}, inplace=True)
         preds["SMILES"] = preds["SMILES"].apply(lambda x: x[0] if isinstance(x, list) else x)
 
-        # Match predictions to test set rows
         matched_test_df = test_df[test_df[config["smiles_col"]].isin(preds["SMILES"])].reset_index(drop=True)
         matched_preds = preds[preds["SMILES"].isin(matched_test_df[config["smiles_col"]])].reset_index(drop=True)
 
-        # Validate alignment
-        assert len(matched_test_df) == len(matched_preds), f"Mismatch: {len(matched_test_df)} true vs {len(matched_preds)} preds"
+        assert len(matched_test_df) == len(matched_preds), f"Mismatch in fold {fold_idx}"
 
         y_true = matched_test_df[config["target_col"]]
         y_score = matched_preds.get("prediction", matched_preds[config["target_col"]])
@@ -352,36 +412,30 @@ def run_kfold_cv(config):
 
         print(f"✅ Fold {fold_idx} metrics: {metrics}")
 
-    # Save predictions for curve plotting
     preds_df = pd.concat(all_preds, ignore_index=True)
     preds_df.to_csv(os.path.join(config["base_dir"], "kfold_predictions.csv"), index=False)
 
-    # Save metrics with confidence intervals
     metrics_df = pd.DataFrame(fold_metrics)
-
     summary_rows = []
     for metric in metrics_df.columns:
         values = metrics_df[metric]
         mean = values.mean()
-        stderr = sem(values)
-        ci = t.ppf((1 + 0.95) / 2., len(values) - 1) * stderr
-        ci_low = mean - ci
-        ci_high = mean + ci
-
+        stderr = values.sem()
+        ci = 1.96 * stderr
         summary_rows.append({
             "Metric": metric.upper(),
             "Mean": round(mean, 4),
-            "CI lower": round(ci_low, 4),
-            "CI upper": round(ci_high, 4)
+            "CI lower": round(mean - ci, 4),
+            "CI upper": round(mean + ci, 4)
         })
 
     summary_df = pd.DataFrame(summary_rows)
-    summary_path = os.path.join(config["base_dir"], "kfold_metrics_summary.csv")
-    summary_df.to_csv(summary_path, index=False)
+    summary_df.to_csv(os.path.join(config["base_dir"], "kfold_metrics_summary.csv"), index=False)
 
-    print(f"\n💾 Saved summary metrics with CIs to {summary_path}")
     print("\n📊 Final K-Fold CV Summary:")
     print(summary_df.to_string(index=False))
+
+
 
 
 def run_nested_cv(config):
@@ -443,6 +497,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_rdkit_features", action="store_true", help="Use RDKit 2D normalized features"),
     parser.add_argument("--scale_rdkit_features", action="store_true", default=True, help="Normalize RDKit features (default: True)"),
     parser.add_argument("--config_path", type=str, default=default_config["hyperparams_path"])
+    parser.add_argument("--num_gpus", type=int, default=default_config["num_gpus"], help="Number of GPUs to use in parallel")
+
 
 
     args = parser.parse_args()

@@ -23,12 +23,14 @@ def plot_kfold_curves(preds_csv, target_col="y_true", score_col="y_score", fold_
     all_roc_aucs = []
     all_pr_aucs = []
     f1_scores = []
-
-    fig_roc, ax_roc = plt.subplots(figsize=(7, 6))
-    fig_pr, ax_pr = plt.subplots(figsize=(7, 6))
+    f1_points = []
+    pr_colors = []
 
     best_f1 = 0
     best_f1_coords = (0, 0)
+
+    fig_roc, ax_roc = plt.subplots(figsize=(7, 6))
+    fig_pr, ax_pr = plt.subplots(figsize=(7, 6))
 
     for fold in unique_folds:
         fold_df = df[df[fold_col] == fold]
@@ -43,26 +45,37 @@ def plot_kfold_curves(preds_csv, target_col="y_true", score_col="y_score", fold_
         all_roc_aucs.append(roc_auc)
         ax_roc.plot(fpr, tpr, alpha=0.2, label=f"Fold {fold} (AUC = {roc_auc:.2f})")
 
-        # === PR + F1 ===
-        precision, recall, _ = precision_recall_curve(y_true, y_score)
+        # === PR ===
+        precision, recall, thresholds = precision_recall_curve(y_true, y_score)
         interp_precision = np.interp(mean_recall, recall[::-1], precision[::-1])
         all_precisions.append(interp_precision)
         pr_auc = auc(recall, precision)
         all_pr_aucs.append(pr_auc)
 
-        # F1 curve
+        # F1 score at threshold 0.5
+        y_pred_0_5 = (y_score >= 0.5).astype(int)
+        fold_f1 = f1_score(y_true, y_pred_0_5)
+        f1_scores.append(fold_f1)
+
+        # Precision and recall at threshold 0.5
+        tp = ((y_true == 1) & (y_pred_0_5 == 1)).sum()
+        fp = ((y_true == 0) & (y_pred_0_5 == 1)).sum()
+        fn = ((y_true == 1) & (y_pred_0_5 == 0)).sum()
+        precision_0_5 = tp / (tp + fp + 1e-8)
+        recall_0_5 = tp / (tp + fn + 1e-8)
+        f1_points.append((recall_0_5, precision_0_5))
+
+        # Compute F1 scores across all thresholds
         f1_curve = 2 * precision * recall / (precision + recall + 1e-8)
-        f1_max = np.max(f1_curve)
-        f1_scores.append((recall, f1_curve))
+        max_f1_idx = np.argmax(f1_curve)
+        if f1_curve[max_f1_idx] > best_f1:
+            best_f1 = f1_curve[max_f1_idx]
+            best_f1_coords = (recall[max_f1_idx], precision[max_f1_idx])
 
-        ax_pr.plot(recall, precision, alpha=0.2,
-                   label=f"Fold {fold} (AUC = {pr_auc:.2f}, F1 = {f1_max:.2f})")
-
-        # Track best F1 point across folds
-        best_idx = np.argmax(f1_curve)
-        if f1_curve[best_idx] > best_f1:
-            best_f1 = f1_curve[best_idx]
-            best_f1_coords = (recall[best_idx], precision[best_idx])
+        # Plot PR curve and capture the color
+        pr_line, = ax_pr.plot(recall, precision, alpha=0.2,
+                              label=f"Fold {fold} (AUC = {pr_auc:.2f}, F1 = {fold_f1:.2f})")
+        pr_colors.append(pr_line.get_color())
 
     # === Mean ROC ===
     mean_tpr = np.mean(all_tprs, axis=0)
@@ -77,14 +90,20 @@ def plot_kfold_curves(preds_csv, target_col="y_true", score_col="y_score", fold_
     ax_roc.spines['right'].set_visible(False)
     ax_roc.legend()
 
-    # === Mean PR ===
+    # === Mean PR and F1 ===
     mean_precision = np.mean(all_precisions, axis=0)
     mean_pr_auc, (pr_ci_low, pr_ci_high) = mean_ci(all_pr_aucs)
+    mean_f1, (f1_ci_low, f1_ci_high) = mean_ci(f1_scores)
     ax_pr.plot(mean_recall, mean_precision, color="black", lw=2,
-               label=f"Mean PR (AUC = {mean_pr_auc:.2f} ± {pr_ci_high - mean_pr_auc:.2f})")
+               label=f"Mean PR (AUC = {mean_pr_auc:.2f} ± {pr_ci_high - mean_pr_auc:.2f}, F1 = {mean_f1:.2f} ± {f1_ci_high - mean_f1:.2f})")
 
-    # Best F1 annotation
-    ax_pr.scatter(*best_f1_coords, color="red", zorder=5, label=f"Best F1 = {best_f1:.2f}")
+    # Plot F1 scatter points with corresponding PR curve colors
+    for (recall_pt, precision_pt), color in zip(f1_points, pr_colors):
+        ax_pr.scatter(recall_pt, precision_pt, s=30, color=color, alpha=0.8)
+
+    # Plot best F1 point across all thresholds and folds
+    ax_pr.scatter(*best_f1_coords, color="red", marker="*", s=100, label=f"Best F1 = {best_f1:.2f}")
+
     ax_pr.set_xlabel("Recall")
     ax_pr.set_ylabel("Precision")
     ax_pr.set_title("Precision-Recall Curve")
