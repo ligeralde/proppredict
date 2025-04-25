@@ -3,6 +3,41 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, precision_recall_curve, auc, f1_score
 from scipy.stats import sem, t
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from sklearn.manifold import TSNE
+
+
+def plot_categorical_histogram(df, column, top_n=None, title=None):
+    """
+    Plots a bar chart for categorical string data in a specified column.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame.
+        column (str): Name of the column containing categorical string data.
+        top_n (int, optional): If specified, only the top_n most frequent categories are shown.
+        title (str, optional): Title for the plot.
+    """
+    # Count the occurrences of each category
+    value_counts = df[column].value_counts()
+
+    # Optionally select only the top N categories
+    if top_n is not None:
+        value_counts = value_counts.head(top_n)
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    value_counts.plot(kind='bar')
+    plt.xlabel(column)
+    plt.ylabel("Count")
+    plt.title(title or f"Histogram of '{column}'")
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.show()
+
+# Example usage:
+# df = pd.read_csv("your_file.csv")
+# plot_categorical_histogram(df, column='your_column_name', top_n=10)
 
 
 def mean_ci(values, confidence=0.95):
@@ -74,7 +109,7 @@ def plot_kfold_curves(preds_csv, target_col="y_true", score_col="y_score", fold_
 
         # Plot PR curve and capture the color
         pr_line, = ax_pr.plot(recall, precision, alpha=0.2,
-                              label=f"Fold {fold} (AUC = {pr_auc:.2f}, F1 = {fold_f1:.2f})")
+                              label=rf"Fold {fold} (AUC = {pr_auc:.2f}, F1_{50} = {fold_f1:.2f})")
         pr_colors.append(pr_line.get_color())
 
     # === Mean ROC ===
@@ -112,3 +147,58 @@ def plot_kfold_curves(preds_csv, target_col="y_true", score_col="y_score", fold_
     ax_pr.legend()
 
     return fig_roc, fig_pr
+
+
+
+
+
+def smiles_to_morgan_fp(smiles, radius=2, n_bits=2048):
+    if not isinstance(smiles, str) or not smiles.strip():
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits)
+    return np.array(fp)
+
+def merge_and_deduplicate(dfs, smiles_column):
+    """
+    Merges DataFrames, deduplicates, and tracks original source.
+    Adds a column 'source_df' indicating origin.
+    """
+    labeled_dfs = []
+    for i, df in enumerate(dfs):
+        df_copy = df.copy()
+        df_copy["source_df"] = f"df_{i}"
+        labeled_dfs.append(df_copy)
+    
+    combined_df = pd.concat(labeled_dfs, ignore_index=True)
+    deduped_df = combined_df.drop_duplicates(subset=smiles_column)
+    return deduped_df
+
+def compute_fingerprints(df, smiles_column):
+    fps = []
+    valid_indices = []
+    for idx, smi in enumerate(df[smiles_column]):
+        fp = smiles_to_morgan_fp(smi)
+        if fp is not None:
+            fps.append(fp)
+            valid_indices.append(idx)
+    return np.array(fps), valid_indices
+
+def tsne_plot(fps, labels, title="t-SNE colored by source DataFrame"):
+    tsne = TSNE(n_components=2, perplexity=30, random_state=42)
+    tsne_result = tsne.fit_transform(fps)
+
+    plt.figure(figsize=(10, 8))
+    unique_labels = sorted(set(labels))
+    for label in unique_labels:
+        mask = np.array(labels) == label
+        plt.scatter(tsne_result[mask, 0], tsne_result[mask, 1], label=label, alpha=0.7)
+    
+    plt.title(title)
+    plt.xlabel("t-SNE 1")
+    plt.ylabel("t-SNE 2")
+    plt.legend(title="Source DF")
+    plt.tight_layout()
+    plt.show()

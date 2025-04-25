@@ -339,15 +339,32 @@ def run_fold_parallel(fold_idx, train_df, val_df, test_df, config, gpu_id):
 
 def run_kfold_cv(config):
     df = pd.read_csv(config["dataset_path"])
-    skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
 
-    use_holdout = config.get("holdout_test_path") is not None
-    if use_holdout:
-        print("🧑‍🔬 Using held-out test set.")
-        test_df_full = pd.read_csv(config["holdout_test_path"])
+    holdout_path = config.get("holdout_test_path")
+    holdout_frac = config.get("holdout_frac", 0.0)
+    use_holdout = holdout_path is not None or holdout_frac > 0
+
+    if holdout_path and os.path.exists(holdout_path):
+        print("🧑‍🔬 Using external held-out test set from path.")
+        test_df_full = pd.read_csv(holdout_path)
+    elif holdout_frac > 0:
+        print(f"🧪 Creating internal held-out test set from training data (fraction: {holdout_frac})")
+        df, test_df_full = train_test_split(
+            df,
+            test_size=holdout_frac,
+            stratify=df[config["target_col"]],
+            random_state=config["seed"]
+        )
+        if holdout_path is None and "base_dir" in config:
+            test_save_path = os.path.join(config["base_dir"], "heldout_test.csv")
+            if not os.path.exists(test_save_path):
+                test_df_full.to_csv(test_save_path, index=False)
+                print(f"💾 Saved held-out test set to {test_save_path}")
     else:
-        print("⚠️ No held-out test set — validation used as test.")
+        print("⚠️ No held-out test set — validation will be used as test.")
+        test_df_full = None
 
+    skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
     all_preds = []
     fold_metrics = []
     max_concurrent = config["num_gpus"]
@@ -356,10 +373,9 @@ def run_kfold_cv(config):
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(df, df[config["target_col"]])):
         train_df = df.iloc[train_idx].reset_index(drop=True)
         val_df = df.iloc[val_idx].reset_index(drop=True)
-        test_df = test_df_full.copy() if use_holdout else val_df.copy()
+        test_df = test_df_full.copy() if test_df_full is not None else val_df.copy()
 
         gpu_id = fold_idx % config["num_gpus"]
-
         p = Process(target=run_fold_parallel, args=(fold_idx, train_df, val_df, test_df, config, gpu_id))
         p.start()
         active_processes.append(p)
@@ -377,7 +393,7 @@ def run_kfold_cv(config):
     for fold_idx in range(config["external_folds"]):
         fold_dir = os.path.join(config["base_dir"], f"kfold_{fold_idx}")
         val_path = os.path.join(fold_dir, "val.csv")
-        test_path = val_path if not use_holdout else os.path.join(fold_dir, "test.csv")
+        test_path = os.path.join(fold_dir, "test.csv") if use_holdout else val_path
         preds_path = os.path.join(fold_dir, "model", "test_preds.csv")
 
         test_df = pd.read_csv(test_path)
@@ -434,8 +450,6 @@ def run_kfold_cv(config):
 
     print("\n📊 Final K-Fold CV Summary:")
     print(summary_df.to_string(index=False))
-
-
 
 
 def run_nested_cv(config):
