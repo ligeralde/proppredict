@@ -2,8 +2,8 @@ import os
 import argparse
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, train_test_split
-from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
+from sklearn.model_selection import StratifiedKFold,KFold,train_test_split
+from sklearn.metrics import roc_auc_score, average_precision_score, f1_score, mean_squared_error, r2_score
 from scipy.stats import sem, t
 import subprocess
 # import pickle
@@ -12,11 +12,13 @@ import threading
 import time
 import shutil
 from multiprocessing import Process, cpu_count
+from math import sqrt
 
 
 # === CONFIG (defaults, can be overridden via CLI) ===
 default_config = {
     "metric": "auc",
+    "dataset_type": "classification",
     "num_epochs": 30,
     "base_dir": "coadd_collins_cv_train_output",
     "dataset_path": "your_dataset.csv",
@@ -80,7 +82,7 @@ def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config, g
         "--separate_val_path", val_path,
         "--separate_test_path", test_path,
         "--save_preds",
-        "--dataset_type", "classification",
+        "--dataset_type", config["dataset_type"],
         "--smiles_column", config["smiles_col"],
         "--target_columns", config["target_col"],
         "--save_dir", save_dir,
@@ -111,122 +113,122 @@ def safe_run_chemprop_train(train_path, val_path, test_path, save_dir, config, g
 
 
 
-def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
-    skf_internal = StratifiedKFold(n_splits=config["internal_folds"], shuffle=True, random_state=ext_fold_idx)
-    best_score = -np.inf
-    best_model_dir = None
+# def run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config):
+#     skf_internal = StratifiedKFold(n_splits=config["internal_folds"], shuffle=True, random_state=ext_fold_idx)
+#     best_score = -np.inf
+#     best_model_dir = None
 
-    for int_fold_idx, (int_train_idx, int_val_idx) in enumerate(skf_internal.split(train_val_df, train_val_df[config["target_col"]])):
-        model_dir = os.path.join(ext_dir, f"int_{int_fold_idx}", "model")
-        val_scores_path = os.path.join(model_dir, "val_scores.json")
-        if os.path.exists(val_scores_path):
-            print(f"⏭️  int_{int_fold_idx} already trained — skipping to val score loading")
-            try:
-                scores = pd.read_json(val_scores_path, typ='series')
-                if scores[config["metric"]] > best_score:
-                    best_score = scores[config["metric"]]
-                    best_model_dir = model_dir
-            except Exception as e:
-                print(f"❌ Failed to read existing score for int_{int_fold_idx}: {e}")
-            continue
-        int_dir = os.path.join(ext_dir, f"int_{int_fold_idx}")
-        os.makedirs(int_dir, exist_ok=True)
+#     for int_fold_idx, (int_train_idx, int_val_idx) in enumerate(skf_internal.split(train_val_df, train_val_df[config["target_col"]])):
+#         model_dir = os.path.join(ext_dir, f"int_{int_fold_idx}", "model")
+#         val_scores_path = os.path.join(model_dir, "val_scores.json")
+#         if os.path.exists(val_scores_path):
+#             print(f"⏭️  int_{int_fold_idx} already trained — skipping to val score loading")
+#             try:
+#                 scores = pd.read_json(val_scores_path, typ='series')
+#                 if scores[config["metric"]] > best_score:
+#                     best_score = scores[config["metric"]]
+#                     best_model_dir = model_dir
+#             except Exception as e:
+#                 print(f"❌ Failed to read existing score for int_{int_fold_idx}: {e}")
+#             continue
+#         int_dir = os.path.join(ext_dir, f"int_{int_fold_idx}")
+#         os.makedirs(int_dir, exist_ok=True)
 
-        int_train_df = train_val_df.iloc[int_train_idx].reset_index(drop=True)
-        int_val_df = train_val_df.iloc[int_val_idx].reset_index(drop=True)
+#         int_train_df = train_val_df.iloc[int_train_idx].reset_index(drop=True)
+#         int_val_df = train_val_df.iloc[int_val_idx].reset_index(drop=True)
 
-        train_path = os.path.join(int_dir, "train.csv")
-        val_path = os.path.join(int_dir, "val.csv")
-        int_train_df.to_csv(train_path, index=False)
-        int_val_df.to_csv(val_path, index=False)
+#         train_path = os.path.join(int_dir, "train.csv")
+#         val_path = os.path.join(int_dir, "val.csv")
+#         int_train_df.to_csv(train_path, index=False)
+#         int_val_df.to_csv(val_path, index=False)
 
-        model_dir = os.path.join(int_dir, "model")
+#         model_dir = os.path.join(int_dir, "model")
         
-        safe_run_chemprop_train(train_path,
-                                val_path,
-                                # test_path, #TODO: rewrite to incorporate test_path
-                                model_dir, 
-                                config) 
+#         safe_run_chemprop_train(train_path,
+#                                 val_path,
+#                                 # test_path, #TODO: rewrite to incorporate test_path
+#                                 model_dir, 
+#                                 config) 
 
         
-        if not os.path.exists(val_scores_path):
-            print(f"⚠️ val_scores.json not found for int_{int_fold_idx} — trying manual prediction")
+#         if not os.path.exists(val_scores_path):
+#             print(f"⚠️ val_scores.json not found for int_{int_fold_idx} — trying manual prediction")
 
-            val_preds_path = os.path.join(model_dir, "val_preds.csv")
+#             val_preds_path = os.path.join(model_dir, "val_preds.csv")
 
-            subprocess.run([
-                "chemprop_predict",
-                "--test_path", val_path,
-                "--checkpoint_path", os.path.join(model_dir, "fold_0", "model_0", "model.pt"),
-                "--preds_path", val_preds_path,
-                "--smiles_column", config["smiles_col"] #TODO: add rdkit config, hyperparams
-            ], check=True)
+#             subprocess.run([
+#                 "chemprop_predict",
+#                 "--test_path", val_path,
+#                 "--checkpoint_path", os.path.join(model_dir, "fold_0", "model_0", "model.pt"),
+#                 "--preds_path", val_preds_path,
+#                 "--smiles_column", config["smiles_col"] #TODO: add rdkit config, hyperparams
+#             ], check=True)
 
-            val_df = pd.read_csv(val_path)
-            preds = pd.read_csv(val_preds_path)
+#             val_df = pd.read_csv(val_path)
+#             preds = pd.read_csv(val_preds_path)
 
-            # if "prediction" in preds.columns:
-            y_true = val_df[config["target_col"]]
-            # y_score = preds.get("prediction", preds[config["target_col"]])
-            y_score = pd.to_numeric(preds.get("prediction", preds[config["target_col"]]), errors="coerce")
-            if y_score.isnull().any():
-                print("⚠️ Warning: Some predicted scores could not be converted to floats.")
-                y_score = y_score.fillna(0.0)  # or drop rows
+#             # if "prediction" in preds.columns:
+#             y_true = val_df[config["target_col"]]
+#             # y_score = preds.get("prediction", preds[config["target_col"]])
+#             y_score = pd.to_numeric(preds.get("prediction", preds[config["target_col"]]), errors="coerce")
+#             if y_score.isnull().any():
+#                 print("⚠️ Warning: Some predicted scores could not be converted to floats.")
+#                 y_score = y_score.fillna(0.0)  # or drop rows
 
-            try:
+#             try:
        
                 
-                # if config["metric"] == "auc":
-                roc_auc = roc_auc_score(y_true, y_score)
-                # elif config["metric"] == "f1":
-                y_pred = (y_score >= 0.5).astype(int)
-                f1 = f1_score(y_true, y_pred)
-                # elif config["metric"] == "auc_pr":
-                auc_pr = average_precision_score(y_true, y_score)
-                # else:
-                    # raise ValueError(f"Unsupported metric: {config['metric']}")
-                with open(val_scores_path, "w") as f:
-                    f.write(f'{{"auc": {roc_auc:.4f}, "f1": {f1:.4f}, "auc_pr": {auc_pr:.4f}}}')
-                print(f"✅ Manually computed and saved val scores: AUC={roc_auc:.4f}, F1={f1:.4f}, PR={auc_pr:.4f}")
+#                 # if config["metric"] == "auc":
+#                 roc_auc = roc_auc_score(y_true, y_score)
+#                 # elif config["metric"] == "f1":
+#                 y_pred = (y_score >= 0.5).astype(int)
+#                 f1 = f1_score(y_true, y_pred)
+#                 # elif config["metric"] == "auc_pr":
+#                 auc_pr = average_precision_score(y_true, y_score)
+#                 # else:
+#                     # raise ValueError(f"Unsupported metric: {config['metric']}")
+#                 with open(val_scores_path, "w") as f:
+#                     f.write(f'{{"auc": {roc_auc:.4f}, "f1": {f1:.4f}, "auc_pr": {auc_pr:.4f}}}')
+#                 print(f"✅ Manually computed and saved val scores: AUC={roc_auc:.4f}, F1={f1:.4f}, PR={auc_pr:.4f}")
 
 
-            except Exception as e:
-                print(f"❌ Failed to compute score manually: {e}")
-                continue
-            # else:
-            #     print("❌ Prediction column missing from manual prediction output")
-            #     continue
+#             except Exception as e:
+#                 print(f"❌ Failed to compute score manually: {e}")
+#                 continue
+#             # else:
+#             #     print("❌ Prediction column missing from manual prediction output")
+#             #     continue
 
-        try:
-            scores = pd.read_json(val_scores_path, typ='series')
-            if scores[config["metric"]] > best_score:
-                best_score = scores[config["metric"]]
-                best_model_dir = model_dir
-        except Exception as e:
-            print(f"❌ Failed to read AUC for int_{int_fold_idx}: {e}")
+#         try:
+#             scores = pd.read_json(val_scores_path, typ='series')
+#             if scores[config["metric"]] > best_score:
+#                 best_score = scores[config["metric"]]
+#                 best_model_dir = model_dir
+#         except Exception as e:
+#             print(f"❌ Failed to read AUC for int_{int_fold_idx}: {e}")
 
-    if best_model_dir is None:
-        raise RuntimeError(f"❌ No valid internal models found for {ext_dir} — check internal CV logs.")
+#     if best_model_dir is None:
+#         raise RuntimeError(f"❌ No valid internal models found for {ext_dir} — check internal CV logs.")
 
-    return best_model_dir
+#     return best_model_dir
 
 
-def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
-    final_dir = os.path.join(ext_dir, "final")
-    os.makedirs(final_dir, exist_ok=True)
+# def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
+#     final_dir = os.path.join(ext_dir, "final")
+#     os.makedirs(final_dir, exist_ok=True)
 
-    # Combine the train and val splits from the best internal model
-    best_int_dir = os.path.dirname(best_model_dir)
-    best_train_df = pd.read_csv(os.path.join(best_int_dir, "train.csv"))
-    best_val_df = pd.read_csv(os.path.join(best_int_dir, "val.csv"))
-    combined_train_df = pd.concat([best_train_df, best_val_df], ignore_index=True)
+#     # Combine the train and val splits from the best internal model
+#     best_int_dir = os.path.dirname(best_model_dir)
+#     best_train_df = pd.read_csv(os.path.join(best_int_dir, "train.csv"))
+#     best_val_df = pd.read_csv(os.path.join(best_int_dir, "val.csv"))
+#     combined_train_df = pd.concat([best_train_df, best_val_df], ignore_index=True)
 
-    final_train_csv = os.path.join(final_dir, "train.csv")
-    final_test_csv = os.path.join(final_dir, "test.csv")
-    final_model_dir = os.path.join(final_dir, "model")
+#     final_train_csv = os.path.join(final_dir, "train.csv")
+#     final_test_csv = os.path.join(final_dir, "test.csv")
+#     final_model_dir = os.path.join(final_dir, "model")
 
-    combined_train_df.to_csv(final_train_csv, index=False)
-    test_df.to_csv(final_test_csv, index=False)
+#     combined_train_df.to_csv(final_train_csv, index=False)
+#     test_df.to_csv(final_test_csv, index=False)
 
     # Use checkpoint_path for warm-starting from best internal model
     # subprocess.run([
@@ -242,40 +244,46 @@ def refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir):
     #     "--metric", config["metric"],
     #     "--checkpoint_path", os.path.join(best_model_dir, "fold_0", "model_0", "model.pt")
     # ], check=True)
-    safe_run_chemprop_train(
-                            # train_path,
-                            # val_path,
-                            # test_path, #TODO: rewrite to incorporate test_path, update var names
-                            # model_dir,
-                            config) 
+    # safe_run_chemprop_train(
+    #                         # train_path,
+    #                         # val_path,
+    #                         # test_path, #TODO: rewrite to incorporate test_path, update var names
+    #                         # model_dir,
+    #                         config) 
     
 
-    return os.path.join(final_model_dir, "val_preds.csv")
+    # return os.path.join(final_model_dir, "val_preds.csv")
 
 
 def evaluate_predictions(preds_csv, config):
     test_preds = pd.read_csv(preds_csv)
     y_true = test_preds[config["target_col"]]
-    # y_score = test_preds[config["target_col"]]
+
     if "prediction" not in test_preds.columns and config["target_col"] not in test_preds.columns:
         raise ValueError("❌ No prediction column found in test predictions.")
-    # y_score = test_preds.get("prediction", test_preds[config["target_col"]])
+
     y_score = pd.to_numeric(test_preds.get("prediction", test_preds[config["target_col"]]), errors="coerce")
     if y_score.isnull().any():
         print("⚠️ Warning: Some predicted scores could not be converted to floats.")
-        y_score = y_score.fillna(0.0)  # or drop rows
-    y_pred = (y_score >= 0.5).astype(int)
+        y_score = y_score.fillna(0.0)
 
-    if config["metric"] == "auc":
-        metric_val = roc_auc_score(y_true, y_score)
-    elif config["metric"] == "f1":
-        metric_val = f1_score(y_true, y_pred)
-    elif config["metric"] == "auc_pr":
-        metric_val = average_precision_score(y_true, y_score)
+    if config["dataset_type"] == "regression":
+        if config["metric"] == "rmse":
+            return {config["metric"]: sqrt(mean_squared_error(y_true, y_score))}
+        elif config["metric"] == "r2":
+            return {config["metric"]: r2_score(y_true, y_score)}
+        else:
+            raise ValueError(f"Unsupported regression metric: {config['metric']}")
     else:
-        raise ValueError(f"Unsupported metric: {config['metric']}")
-
-    return {config["metric"]: metric_val}
+        y_pred = (y_score >= 0.5).astype(int)
+        if config["metric"] == "auc":
+            return {config["metric"]: roc_auc_score(y_true, y_score)}
+        elif config["metric"] == "f1":
+            return {config["metric"]: f1_score(y_true, y_pred)}
+        elif config["metric"] == "auc_pr":
+            return {config["metric"]: average_precision_score(y_true, y_score)}
+        else:
+            raise ValueError(f"Unsupported classification metric: {config['metric']}")
 
 
 
@@ -352,7 +360,7 @@ def run_kfold_cv(config):
         df, test_df_full = train_test_split(
             df,
             test_size=holdout_frac,
-            stratify=df[config["target_col"]],
+            stratify=df[config["target_col"]] if config["dataset_type"] != "regression" else None,
             random_state=config["seed"]
         )
         if holdout_path is None and "base_dir" in config:
@@ -364,7 +372,8 @@ def run_kfold_cv(config):
         print("⚠️ No held-out test set — validation will be used as test.")
         test_df_full = None
 
-    skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
+    splitter = StratifiedKFold if config["dataset_type"] != "regression" else KFold
+    skf = splitter(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
     all_preds = []
     fold_metrics = []
     max_concurrent = config["num_gpus"]
@@ -392,8 +401,7 @@ def run_kfold_cv(config):
 
     for fold_idx in range(config["external_folds"]):
         fold_dir = os.path.join(config["base_dir"], f"kfold_{fold_idx}")
-        val_path = os.path.join(fold_dir, "val.csv")
-        test_path = os.path.join(fold_dir, "test.csv") if use_holdout else val_path
+        test_path = os.path.join(fold_dir, "test.csv") if use_holdout else os.path.join(fold_dir, "val.csv")
         preds_path = os.path.join(fold_dir, "model", "test_preds.csv")
 
         test_df = pd.read_csv(test_path)
@@ -408,14 +416,20 @@ def run_kfold_cv(config):
         assert len(matched_test_df) == len(matched_preds), f"Mismatch in fold {fold_idx}"
 
         y_true = matched_test_df[config["target_col"]]
-        y_score = matched_preds.get("prediction", matched_preds[config["target_col"]])
-        y_pred = (y_score >= 0.5).astype(int)
+        y_score = pd.to_numeric(matched_preds.get("prediction", matched_preds[config["target_col"]]), errors="coerce")
 
-        metrics = {
-            "auc_roc": roc_auc_score(y_true, y_score),
-            "auc_pr": average_precision_score(y_true, y_score),
-            "f1": f1_score(y_true, y_pred)
-        }
+        if config["dataset_type"] == "regression":
+            fold_metric = {
+                "rmse": sqrt(mean_squared_error(y_true, y_score)),
+                "r2": r2_score(y_true, y_score)
+            }
+        else:
+            y_pred = (y_score >= 0.5).astype(int)
+            fold_metric = {
+                "auc_roc": roc_auc_score(y_true, y_score),
+                "auc_pr": average_precision_score(y_true, y_score),
+                "f1": f1_score(y_true, y_pred)
+            }
 
         fold_preds_df = pd.DataFrame({
             "fold": fold_idx,
@@ -424,9 +438,9 @@ def run_kfold_cv(config):
             "y_score": y_score
         })
         all_preds.append(fold_preds_df)
-        fold_metrics.append(metrics)
+        fold_metrics.append(fold_metric)
 
-        print(f"✅ Fold {fold_idx} metrics: {metrics}")
+        print(f"✅ Fold {fold_idx} metrics: {fold_metric}")
 
     preds_df = pd.concat(all_preds, ignore_index=True)
     preds_df.to_csv(os.path.join(config["base_dir"], "kfold_predictions.csv"), index=False)
@@ -452,50 +466,52 @@ def run_kfold_cv(config):
     print(summary_df.to_string(index=False))
 
 
-def run_nested_cv(config):
-    df = pd.read_csv(config["dataset_path"])
-    skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
-    splits = list(skf.split(df, df[config["target_col"]]))
 
-    external_metrics = []
+# def run_nested_cv(config):
+#     df = pd.read_csv(config["dataset_path"])
+#     skf = StratifiedKFold(n_splits=config["external_folds"], shuffle=True, random_state=config["seed"])
+#     splits = list(skf.split(df, df[config["target_col"]]))
 
-    for ext_fold_idx, (train_val_idx, test_idx) in enumerate(splits):
-        ext_dir = os.path.join(config["base_dir"], f"ext_{ext_fold_idx}")
-        preds_csv = os.path.join(ext_dir, "final", "model", "test_preds.csv")
+#     external_metrics = []
 
-        if os.path.exists(preds_csv):
-            print(f"✅ ext_{ext_fold_idx} already complete — skipping")
-            continue
+#     for ext_fold_idx, (train_val_idx, test_idx) in enumerate(splits):
+#         ext_dir = os.path.join(config["base_dir"], f"ext_{ext_fold_idx}")
+#         preds_csv = os.path.join(ext_dir, "final", "model", "test_preds.csv")
 
-        train_val_df = df.iloc[train_val_idx].reset_index(drop=True)
-        test_df = df.iloc[test_idx].reset_index(drop=True)
+#         if os.path.exists(preds_csv):
+#             print(f"✅ ext_{ext_fold_idx} already complete — skipping")
+#             continue
 
-        print(f"\n🔁 Running internal CV for ext_{ext_fold_idx}...")
-        best_model_dir = run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config)
+#         train_val_df = df.iloc[train_val_idx].reset_index(drop=True)
+#         test_df = df.iloc[test_idx].reset_index(drop=True)
 
-        print(f"🔄 Re-training best model for ext_{ext_fold_idx}...")
-        preds_csv = refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir)
+#         print(f"\n🔁 Running internal CV for ext_{ext_fold_idx}...")
+#         best_model_dir = run_internal_cv(train_val_df, ext_dir, ext_fold_idx, config)
 
-        print(f"📊 Evaluating predictions for ext_{ext_fold_idx}...")
-        metrics = evaluate_predictions(preds_csv, config)
-        print(f"  ✅ Test Metrics: {metrics}")
-        external_metrics.append(metrics)
+#         print(f"🔄 Re-training best model for ext_{ext_fold_idx}...")
+#         preds_csv = refit_final_model(train_val_df, test_df, ext_dir, config, best_model_dir)
 
-    if external_metrics:
-        external_df = pd.DataFrame(external_metrics)
-        external_df.to_csv(os.path.join(config["base_dir"], "external_metrics.csv"), index=False)
-        print(f"💾 Saved detailed test metrics to {os.path.join(config['base_dir'], 'external_metrics.csv')}")
-        print("\n📊 Final Summary Across External Folds:")
-        for metric in external_df.columns:
-            mean, (ci_low, ci_high) = mean_ci(external_df[metric])
-            print(f"{metric.upper()}: {mean:.3f} (95% CI: {ci_low:.3f}–{ci_high:.3f})")
-    else:
-        print("\n⚠️ No folds were successfully evaluated.")
+#         print(f"📊 Evaluating predictions for ext_{ext_fold_idx}...")
+#         metrics = evaluate_predictions(preds_csv, config)
+#         print(f"  ✅ Test Metrics: {metrics}")
+#         external_metrics.append(metrics)
+
+#     if external_metrics:
+#         external_df = pd.DataFrame(external_metrics)
+#         external_df.to_csv(os.path.join(config["base_dir"], "external_metrics.csv"), index=False)
+#         print(f"💾 Saved detailed test metrics to {os.path.join(config['base_dir'], 'external_metrics.csv')}")
+#         print("\n📊 Final Summary Across External Folds:")
+#         for metric in external_df.columns:
+#             mean, (ci_low, ci_high) = mean_ci(external_df[metric])
+#             print(f"{metric.upper()}: {mean:.3f} (95% CI: {ci_low:.3f}–{ci_high:.3f})")
+#     else:
+#         print("\n⚠️ No folds were successfully evaluated.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run nested CV with Chemprop")
-    parser.add_argument("--metric", type=str, default=default_config["metric"], choices=["auc", "f1", "auc_pr"], help="Metric to optimize and evaluate")
+    parser.add_argument("--metric", type=str, default=default_config["metric"],
+                    help="Metric to optimize and evaluate (classification: auc/f1/auc_pr, regression: rmse/r2)")
     parser.add_argument("--num_epochs", type=int, default=default_config["num_epochs"])
     parser.add_argument("--base_dir", type=str, default=default_config["base_dir"])
     parser.add_argument("--dataset_path", type=str, default=default_config["dataset_path"])
@@ -512,6 +528,8 @@ if __name__ == "__main__":
     parser.add_argument("--scale_rdkit_features", action="store_true", default=True, help="Normalize RDKit features (default: True)"),
     parser.add_argument("--config_path", type=str, default=default_config["hyperparams_path"])
     parser.add_argument("--num_gpus", type=int, default=default_config["num_gpus"], help="Number of GPUs to use in parallel")
+    parser.add_argument("--dataset_type", type=str, default="classification", choices=["classification", "regression", "multiclass"], help="Chemprop task type")
+
 
 
 
@@ -521,5 +539,6 @@ if __name__ == "__main__":
     if config["cv_mode"] == "kfold":
         run_kfold_cv(config)
     else:
-        run_nested_cv(config)
+        # run_nested_cv(config)
+        raise NotImplementedError("Nested CV is not yet implemented in this script.")
 

@@ -3,8 +3,10 @@ import re
 import json
 import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score
-from chemprop.train import make_predictions
 from chemprop.args import PredictArgs
+from chemprop.train import make_predictions
+from chemprop.utils import load_args
+
 
 def evaluate_kfold_inference_on_test(
     base_path,
@@ -28,7 +30,8 @@ def evaluate_kfold_inference_on_test(
             print(f"❌ Missing model folder in {fold_root}, skipping.")
             continue
 
-        args_json_path = os.path.join(fold_root, "args.json")
+        args_json_path = os.path.join(base_path, kfold, "model", "args.json")
+
         temp_preds_path = os.path.join(base_path, kfold, "heldout_preds.csv")
 
         checkpoint_paths = [
@@ -45,18 +48,16 @@ def evaluate_kfold_inference_on_test(
             "preds_path": temp_preds_path,
             "checkpoint_paths": checkpoint_paths,
             "smiles_column": smiles_col,
-            "use_compound_names": False
+            "use_compound_names": False,
         }
 
-        if os.path.exists(args_json_path):
-            with open(args_json_path) as f:
-                train_args = json.load(f)
-            if "features_generator" in train_args:
-                args_dict["features_generator"] = train_args["features_generator"]
-            if "features_scaling" in train_args:
-                args_dict["features_scaling"] = train_args["features_scaling"]
-            if "no_features" in train_args:
-                args_dict["no_features"] = train_args["no_features"]
+        with open(args_json_path) as f:
+            train_args = json.load(f)
+
+        args_dict["features_generator"] = train_args.get("features_generator", None)
+        args_dict["features_scaling"] = train_args.get("features_scaling", False)
+        args_dict["no_features"] = train_args.get("no_features", False)
+
 
         args = PredictArgs().from_dict(args_dict)
 
@@ -109,12 +110,14 @@ def evaluate_kfold_inference_on_test(
         })
         all_preds.append(fold_preds_df)
 
-        auc_roc = roc_auc_score(y_true, y_score)
-        auc_pr = average_precision_score(y_true, y_score)
-        y_pred = (y_score >= 0.5).astype(int)
-        f1 = f1_score(y_true, y_pred)
+        # if train_args['dataset_type'] == "classification":
+            
+        #     auc_roc = roc_auc_score(y_true, y_score)
+        #     auc_pr = average_precision_score(y_true, y_score)
+        #     y_pred = (y_score >= 0.5).astype(int)
+        #     f1 = f1_score(y_true, y_pred)
 
-        print(f"✅ Fold {fold_idx}: AUC ROC = {auc_roc:.3f}, AUC PR = {auc_pr:.3f}, F1 = {f1:.3f}")
+        #     print(f"✅ Fold {fold_idx}: AUC ROC = {auc_roc:.3f}, AUC PR = {auc_pr:.3f}, F1 = {f1:.3f}")
 
     if not all_preds:
         raise RuntimeError("No predictions were made. Check SMILES validity and model paths.")

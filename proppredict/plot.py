@@ -7,8 +7,373 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from sklearn.manifold import TSNE
 
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from math import sqrt,ceil
 
-def plot_categorical_histogram(df, column, top_n=None, title=None):
+
+
+def plot_aggregate_topk_enrichment(
+    df,
+    smiles_col="SMILES",
+    y_true_col="y_true",
+    y_pred_col="y_score",
+    top_k_true=50,
+    top_k_pred=50,
+    direction="top",  # "top" or "bottom"
+    title="Aggregate Top-K Enrichment",
+    n_random_trials=0,
+    random_seed=42
+):
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    assert direction in ["top", "bottom"]
+
+    # Aggregate all predictions per SMILES by average prediction
+    df = df.copy()
+    avg_scores = df.groupby(smiles_col)[y_pred_col].mean()
+    true_values = df.groupby(smiles_col)[y_true_col].mean()
+
+    # If antibiotic column exists, propagate it
+    has_antibiotic_col = "antibiotic" in df.columns
+    if has_antibiotic_col:
+        antibiotic_flags = df.groupby(smiles_col)["antibiotic"].max()
+    else:
+        antibiotic_flags = pd.Series(0, index=avg_scores.index)
+
+    # Compute average rank for tie-breaking in consistent sorting
+    df["rank"] = df.groupby("fold")[y_pred_col].rank(ascending=(direction == "bottom"))
+    avg_ranks = df.groupby(smiles_col)["rank"].mean()
+
+    # Build a new DataFrame for plotting
+    agg_df = pd.DataFrame({
+        "avg_rank": avg_ranks,
+        "avg_score": avg_scores,
+        "y_true": true_values,
+        "antibiotic": antibiotic_flags
+    }).reset_index()
+
+    # Determine top-K true and predicted compounds
+    if direction == "top":
+        top_true_idx = agg_df.nlargest(top_k_true, "y_true").index
+        top_pred_idx = agg_df.nlargest(top_k_pred, "avg_score").index
+        top_true_ranks = agg_df.loc[top_true_idx]
+    else:
+        top_true_idx = agg_df.nsmallest(top_k_true, "y_true").index
+        top_pred_idx = agg_df.nsmallest(top_k_pred, "avg_score").index
+        top_true_ranks = agg_df.loc[top_true_idx]
+
+    true_idx_set = set(top_true_idx)
+    pred_idx_set = set(top_pred_idx)
+
+    sorted_pred_idx = agg_df.sort_values("avg_score", ascending=(direction == "bottom")).index
+    k_needed = 0
+    covered_true = set()
+    for idx in sorted_pred_idx:
+        k_needed += 1
+        if idx in true_idx_set:
+            covered_true.add(idx)
+        if covered_true == true_idx_set:
+            break
+    else:
+        k_needed = None
+
+    tp_idx = true_idx_set & pred_idx_set
+    fp_idx = pred_idx_set - true_idx_set
+    fn_idx = true_idx_set - pred_idx_set
+
+    n_tp = len(tp_idx)
+    n_fp = len(fp_idx)
+    n_fn = len(fn_idx)
+    recall = n_tp / max(len(true_idx_set), 1)
+    precision = n_tp / max(len(pred_idx_set), 1)
+
+    z_score = None
+    p_value = None
+    rng = np.random.default_rng(random_seed)
+    if n_random_trials > 0:
+        rand_recalls = []
+        all_indices = agg_df.index.tolist()
+        for _ in range(n_random_trials):
+            sampled = set(rng.choice(all_indices, size=top_k_pred, replace=False))
+            r = len(sampled & true_idx_set) / max(len(true_idx_set), 1)
+            rand_recalls.append(r)
+        mean_rand = np.mean(rand_recalls)
+        std_rand = np.std(rand_recalls)
+        z_score = (recall - mean_rand) / (std_rand + 1e-8)
+        p_value = (np.sum(np.array(rand_recalls) >= recall) + 1) / (n_random_trials + 1)
+
+    fig, (ax_scatter, ax_cum, ax_bar) = plt.subplots(3, 1, figsize=(10, 10), gridspec_kw={'height_ratios': [3, 2, 1]})
+
+    # --- Scatter plot: Predicted vs True ---
+    ax_scatter.scatter(agg_df["y_true"], agg_df["avg_score"], alpha=0.15, edgecolors='none', color='gray', label='All', zorder=0)
+    ax_scatter.scatter(agg_df.loc[list(fn_idx), "y_true"], agg_df.loc[list(fn_idx), "avg_score"],
+                       color='purple', edgecolors='k', label='Missed (FN)', zorder=1)
+    ax_scatter.scatter(agg_df.loc[list(fp_idx), "y_true"], agg_df.loc[list(fp_idx), "avg_score"],
+                       color='red', edgecolors='k', label='False + (FP)', zorder=2)
+    ax_scatter.scatter(agg_df.loc[list(tp_idx), "y_true"], agg_df.loc[list(tp_idx), "avg_score"],
+                       color='green', edgecolors='k', label='Captured (TP)', zorder=3)
+
+    if has_antibiotic_col:
+        antibiotic_df = agg_df[agg_df["antibiotic"] == 1]
+        ax_scatter.scatter(
+            antibiotic_df["y_true"], antibiotic_df["avg_score"],
+            facecolors='none', edgecolors='black', marker='*', s=150,
+            label='Antibiotic', zorder=4
+        )
+
+    ax_scatter.set_xlabel("True")
+    ax_scatter.set_ylabel("Predicted (avg)")
+    ax_scatter.set_title(title)
+    ax_scatter.grid(True)
+    ax_scatter.legend(loc='lower right', frameon=True)
+
+    # --- Annotation box ---
+    annotation = (
+        f"TP: {n_tp}  FP: {n_fp}  FN: {n_fn}\n"
+        f"Recall: {recall:.1%}  Precision: {precision:.1%}"
+    )
+    if z_score is not None:
+        annotation += f"\nZ (recall vs rand): {z_score:.2f}  p: {p_value:.3f}"
+    annotation += f"\nk to get all top-k true: {k_needed}"
+
+    ax_scatter.text(
+        0.95, 0.95, annotation,
+        transform=ax_scatter.transAxes,
+        ha='right', va='top',
+        fontsize=9,
+        bbox=dict(facecolor='white', edgecolor='gray', boxstyle='round,pad=0.4')
+    )
+
+    # --- Cumulative capture plot ---
+
+    sorted_preds = agg_df.sort_values("avg_score", ascending=(direction == "bottom"))
+    hit_vector = [1 if idx in true_idx_set else 0 for idx in sorted_preds.index]
+    cumulative_hits = np.cumsum(hit_vector)
+    x = np.arange(1, len(cumulative_hits) + 1)
+
+    ax_cum.plot(x[:top_k_pred], cumulative_hits[:top_k_pred], color="blue", lw=2, label="Cumulative TP")
+    ax_cum.set_xlim(1, top_k_pred)
+    ax_cum.set_ylim(0, top_k_true + 1)
+    ax_cum.set_title("Cumulative TP")
+    ax_cum.set_ylabel("# True Top-K Captured")
+    ax_cum.set_xlabel("Top-K Predicted Rank")
+    ax_cum.grid(True)
+
+    if has_antibiotic_col:
+        antibiotic_in_preds = sorted_preds.iloc[:top_k_pred][sorted_preds["antibiotic"] == 1]
+        ranks_abx = antibiotic_in_preds.index
+        hits_abx = cumulative_hits[ranks_abx]
+        ax_cum.scatter(ranks_abx + 1, hits_abx, facecolors='none', edgecolors='black', marker='*', s=100, label='Antibiotic')
+
+    ax_cum.legend()
+
+
+    # --- Rank capture bar plot ---
+    capture_flags = [1 if idx in pred_idx_set else 0 for idx in top_true_ranks.index]
+    y_ranks = np.arange(1, top_k_true + 1)
+    ax_bar.vlines(y_ranks, 0, capture_flags, color='green', linewidth=2)
+    ax_bar.set_xlim(0, top_k_true + 1)
+    ax_bar.set_ylim(0, 1.1)
+    ax_bar.set_ylabel("Captured")
+    ax_bar.set_xlabel("Top-K True Rank")
+    ax_bar.set_yticks([0, 1])
+    xticks = sorted(set([1] + list(range(10, top_k_true + 1, 10))))
+    ax_bar.set_xticks(xticks)
+    ax_bar.set_xticklabels([str(t) for t in xticks])
+    ax_bar.grid(True, axis='x', linestyle='--', alpha=0.3)
+
+    if has_antibiotic_col:
+        antibiotic_in_top_true = top_true_ranks[top_true_ranks["antibiotic"] == 1]
+        abx_positions = [i + 1 for i, idx in enumerate(top_true_ranks.index) if idx in antibiotic_in_top_true.index]
+        abx_captured = [capture_flags[i] for i, idx in enumerate(top_true_ranks.index) if idx in antibiotic_in_top_true.index]
+        ax_bar.scatter(abx_positions, abx_captured, facecolors='none', edgecolors='black', marker='*', s=100)
+
+    plt.tight_layout()
+    plt.show()
+
+    return agg_df
+
+
+
+
+def plot_pred_vs_true_topk_enrichment_by_fold(
+    df,
+    fold_col="fold",
+    y_true_col="y_true",
+    y_pred_col="y_score",
+    top_k_true=50,
+    top_k_pred=50,
+    direction="top",  # "top" or "bottom"
+    title="Top-K Enrichment per Fold",
+    n_random_trials=0,
+    random_seed=42
+):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+
+    assert direction in ["top", "bottom"]
+
+    folds = sorted(df[fold_col].unique())
+    n_folds = len(folds)
+
+    summary = []
+    rng = np.random.default_rng(random_seed)
+
+    for fold in folds:
+        fig, (ax_scatter, ax_cum, ax_bar) = plt.subplots(3, 1, figsize=(10, 10), gridspec_kw={'height_ratios': [3, 2, 1]})
+
+        fold_df = df[df[fold_col] == fold].copy()
+        y_true = fold_df[y_true_col].values
+        y_pred = fold_df[y_pred_col].values
+
+        r2 = r2_score(y_true, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        mae = mean_absolute_error(y_true, y_pred)
+
+        if direction == "top":
+            top_true_idx = fold_df[y_true_col].nlargest(top_k_true).index
+            top_pred_idx = fold_df[y_pred_col].nlargest(top_k_pred).index
+            top_true_ranks = fold_df[y_true_col].nlargest(top_k_true)
+        else:
+            top_true_idx = fold_df[y_true_col].nsmallest(top_k_true).index
+            top_pred_idx = fold_df[y_pred_col].nsmallest(top_k_pred).index
+            top_true_ranks = fold_df[y_true_col].nsmallest(top_k_true)
+
+        true_idx_set = set(top_true_idx)
+        pred_idx_set = set(top_pred_idx)
+
+        sorted_pred_idx = fold_df[y_pred_col].sort_values(ascending=(direction == "bottom")).index
+        k_needed = 0
+        covered_true = set()
+        for idx in sorted_pred_idx:
+            k_needed += 1
+            if idx in true_idx_set:
+                covered_true.add(idx)
+            if covered_true == true_idx_set:
+                break
+        else:
+            k_needed = None
+
+        tp_idx = true_idx_set & pred_idx_set
+        fp_idx = pred_idx_set - true_idx_set
+        fn_idx = true_idx_set - pred_idx_set
+
+        n_tp = len(tp_idx)
+        n_fp = len(fp_idx)
+        n_fn = len(fn_idx)
+        recall = n_tp / max(len(true_idx_set), 1)
+        precision = n_tp / max(len(pred_idx_set), 1)
+
+        top_k_true_captures = [int(idx in pred_idx_set) for idx in top_true_ranks.index]
+
+        z_score = None
+        p_value = None
+        if n_random_trials > 0:
+            rand_recalls = []
+            all_indices = fold_df.index.tolist()
+            for _ in range(n_random_trials):
+                sampled = set(rng.choice(all_indices, size=top_k_pred, replace=False))
+                r = len(sampled & true_idx_set) / max(len(true_idx_set), 1)
+                rand_recalls.append(r)
+            mean_rand = np.mean(rand_recalls)
+            std_rand = np.std(rand_recalls)
+            z_score = (recall - mean_rand) / (std_rand + 1e-8)
+            p_value = (np.sum(np.array(rand_recalls) >= recall) + 1) / (n_random_trials + 1)
+
+        ax_scatter.scatter(y_true, y_pred, alpha=0.15, edgecolors='none', color='gray', label='All', zorder=0)
+        ax_scatter.scatter(fold_df.loc[list(fn_idx), y_true_col], fold_df.loc[list(fn_idx), y_pred_col],
+                           color='purple', edgecolors='k', label='Missed (FN)', zorder=1)
+        ax_scatter.scatter(fold_df.loc[list(fp_idx), y_true_col], fold_df.loc[list(fp_idx), y_pred_col],
+                           color='red', edgecolors='k', label='False + (FP)', zorder=2)
+        ax_scatter.scatter(fold_df.loc[list(tp_idx), y_true_col], fold_df.loc[list(tp_idx), y_pred_col],
+                           color='green', edgecolors='k', label='Captured (TP)', zorder=3)
+        ax_scatter.set_xlabel("True")
+        ax_scatter.set_ylabel("Predicted")
+        ax_scatter.set_title(f"Fold {fold}")
+        ax_scatter.grid(True)
+        ax_scatter.legend(loc='lower right', frameon=True)
+
+        annotation = (
+            f"$R^2$: {r2:.2f}  RMSE: {rmse:.2f}  MAE: {mae:.2f}\n"
+            f"TP: {n_tp}  FP: {n_fp}  FN: {n_fn}\n"
+            f"Recall: {recall:.1%}  Precision: {precision:.1%}"
+        )
+        if z_score is not None:
+            annotation += f"\nZ (recall vs rand): {z_score:.2f}  p: {p_value:.3f}"
+        annotation += f"\nk to get all top-k true: {k_needed}"
+
+        ax_scatter.text(
+            0.95, 0.95, annotation,
+            transform=ax_scatter.transAxes,
+            ha='right', va='top',
+            fontsize=9,
+            bbox=dict(facecolor='white', edgecolor='gray', boxstyle='round,pad=0.4')
+        )
+
+        sorted_preds = fold_df[y_pred_col].sort_values(ascending=(direction == "bottom"))
+        hit_vector = [1 if idx in true_idx_set else 0 for idx in sorted_preds.index[:top_k_pred]]
+        cumulative_hits = np.cumsum(hit_vector)
+        x = np.arange(1, top_k_pred + 1)
+        ax_cum.plot(x, cumulative_hits, color="blue", lw=2)
+        ax_cum.set_xlim(1, top_k_pred)
+        ax_cum.set_ylim(0, top_k_true + 1)
+        ax_cum.set_title("Cumulative TP")
+        ax_cum.set_ylabel("# True Top-K Captured")
+        ax_cum.set_xlabel("Top-K Predicted Rank")
+        ax_cum.grid(True)
+
+        capture_flags = [1 if idx in pred_idx_set else 0 for idx in top_true_ranks.index]
+        y_ranks = np.arange(1, top_k_true + 1)
+        ax_bar.vlines(y_ranks, 0, capture_flags, color='green', linewidth=2)
+        ax_bar.set_xlim(0, top_k_true + 1)
+        ax_bar.set_ylim(0, 1.1)
+        ax_bar.set_ylabel("Captured")
+        ax_bar.set_xlabel("Top-K True Rank")
+        ax_bar.set_yticks([0, 1])
+
+        # Always include 1 and then multiples of 10 for x-axis ticks
+        xticks = sorted(set([1] + list(range(10, top_k_true + 1, 10))))
+        ax_bar.set_xticks(xticks)
+        ax_bar.set_xticklabels([str(t) for t in xticks])
+
+        ax_bar.grid(True, axis='x', linestyle='--', alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+        summary.append({
+            "fold": fold,
+            "r2": r2,
+            "rmse": rmse,
+            "mae": mae,
+            "top_k_true": len(true_idx_set),
+            "top_k_pred": len(pred_idx_set),
+            "captured": n_tp,
+            "false_positives": n_fp,
+            "missed_positives": n_fn,
+            "recall": recall,
+            "precision": precision,
+            "z_score_vs_random_recall": z_score,
+            "empirical_p_vs_random_recall": p_value,
+            "k_pred_to_capture_all_true_topk": k_needed,
+            "top_k_true_captures": top_k_true_captures
+        })
+
+    return pd.DataFrame(summary)
+
+
+
+
+
+
+
+
+
+def plot_categorical_histogram(df, column, top_n=None, title=None,logy=False):
     """
     Plots a bar chart for categorical string data in a specified column.
 
@@ -27,7 +392,7 @@ def plot_categorical_histogram(df, column, top_n=None, title=None):
 
     # Plot
     plt.figure(figsize=(10, 6))
-    value_counts.plot(kind='bar')
+    value_counts.plot(kind='bar',logy=logy)
     plt.xlabel(column)
     plt.ylabel("Count")
     plt.title(title or f"Histogram of '{column}'")
